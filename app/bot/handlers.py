@@ -162,7 +162,8 @@ async def unsubscribe_callback(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "score_info")
 async def score_info_callback(callback: CallbackQuery) -> None:
     await answer_callback(callback)
-    await callback.message.answer(score_info_text(), reply_markup=main_keyboard())
+    subscribed = await user_is_subscribed(callback.from_user.id)
+    await callback.message.answer(score_info_text(), reply_markup=main_keyboard(subscribed))
 
 
 @router.callback_query(F.data == "set_threshold")
@@ -183,8 +184,10 @@ async def cancel_input(callback: CallbackQuery) -> None:
     async with open_session() as session:
         repo = Repository(session)
         await repo.set_pending_input(callback.from_user.id, None)
+        user = await repo.get_user_with_settings(callback.from_user.id)
+        subscribed = bool(user and user.settings and user.settings.subscribed)
         await session.commit()
-    await callback.message.answer("Скасовано.", reply_markup=main_keyboard())
+    await callback.message.answer("Скасовано.", reply_markup=main_keyboard(subscribed))
 
 
 @router.message(F.text)
@@ -298,3 +301,10 @@ async def set_pending(bot: Bot, chat_id: int, user_id: int, pending: str) -> Non
     else:
         text = "Введіть, за скільки хвилин до заходу сонця нагадати: від 15 до 180."
     await bot.send_message(chat_id, text, reply_markup=cancel_keyboard())
+
+
+async def user_is_subscribed(user_id: int) -> bool:
+    async with open_session() as session:
+        repo = Repository(session)
+        user = await repo.get_user_with_settings(user_id)
+        return bool(user and user.settings and user.settings.subscribed)
