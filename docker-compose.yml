@@ -1,0 +1,22 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-sunset_bot}
+      POSTGRES_USER: ${POSTGRES_USER:-sunset_bot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  bot:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    env_file:
+      - path: .env
+        required: false
+
+volumes:
+  postgres_data:
