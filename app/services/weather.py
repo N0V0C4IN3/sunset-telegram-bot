@@ -27,15 +27,15 @@ class OpenMeteoClient:
 
     async def forecast_for_today(self, latitude: float, longitude: float, timezone: str) -> ForecastResult:
         tz = ZoneInfo(timezone)
-        today = datetime.now(tz).date()
+        now = datetime.now(tz)
         async with httpx.AsyncClient(timeout=15) as client:
             weather_task = self._fetch_weather(client, latitude, longitude, timezone)
             air_quality_task = self._fetch_air_quality(client, latitude, longitude, timezone)
             weather_payload, air_quality_payload = await asyncio.gather(weather_task, air_quality_task)
 
         try:
-            sunset_raw = weather_payload["daily"]["sunset"][0]
-            sunset_at = datetime.fromisoformat(sunset_raw).replace(tzinfo=tz)
+            daily = weather_payload["daily"]
+            sunset_at = self._next_relevant_sunset(daily["sunset"], now, tz)
             hourly = weather_payload["hourly"]
         except (KeyError, IndexError, TypeError, ValueError) as exc:
             raise WeatherError("Open-Meteo response did not include expected fields") from exc
@@ -46,7 +46,7 @@ class OpenMeteoClient:
 
         scored: SunsetScore = score_sunset(weather_window)
         return ForecastResult(
-            forecast_date=today,
+            forecast_date=sunset_at.date(),
             sunset_at=sunset_at,
             score=scored.score,
             description=scored.description,
@@ -58,7 +58,7 @@ class OpenMeteoClient:
             "latitude": latitude,
             "longitude": longitude,
             "timezone": timezone,
-            "forecast_days": 1,
+            "forecast_days": 2,
             "daily": "sunset",
             "hourly": ",".join(
                 [
@@ -83,7 +83,7 @@ class OpenMeteoClient:
             "latitude": latitude,
             "longitude": longitude,
             "timezone": timezone,
-            "forecast_days": 1,
+            "forecast_days": 2,
             "hourly": ",".join(
                 [
                     "pm10",
@@ -102,6 +102,23 @@ class OpenMeteoClient:
             return response.json()
         except httpx.HTTPError:
             return {}
+
+    def _next_relevant_sunset(
+        self,
+        sunsets: list[str],
+        now: datetime,
+        timezone: ZoneInfo,
+    ) -> datetime:
+        candidates = [
+            datetime.fromisoformat(sunset).replace(tzinfo=timezone)
+            for sunset in sunsets
+        ]
+        for sunset_at in candidates:
+            if sunset_at > now:
+                return sunset_at
+        if candidates:
+            return candidates[-1]
+        raise WeatherError("Open-Meteo response did not include sunset times")
 
     def _weather_near_sunset(self, hourly: dict, sunset_at: datetime) -> dict:
         samples = self._samples_near_sunset(hourly, sunset_at, hours_before=2, hours_after=1)

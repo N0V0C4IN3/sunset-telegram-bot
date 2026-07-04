@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,13 +21,17 @@ class ForecastService:
             raise ValueError("User has no location")
         latitude, longitude = location
 
-        cached = await self.repo.get_cached_forecast(
-            user.id,
-            datetime.now(ZoneInfo(user.timezone)).date(),
-            self.settings.forecast_cache_ttl_minutes,
-        )
-        if cached:
-            return _from_cache(cached)
+        timezone = ZoneInfo(user.timezone)
+        local_now = datetime.now(timezone)
+        local_today = local_now.date()
+        for forecast_date in [local_today, local_today + timedelta(days=1)]:
+            cached = await self.repo.get_cached_forecast(
+                user.id,
+                forecast_date,
+                self.settings.forecast_cache_ttl_minutes,
+            )
+            if cached and _as_local_time(cached.sunset_at, timezone) > local_now:
+                return _from_cache(cached)
 
         result = await self.weather_client.forecast_for_today(
             latitude,
@@ -53,3 +57,9 @@ def _from_cache(cache: ForecastCache) -> ForecastResult:
         description=cache.description,
         weather_data=cache.weather_data,
     )
+
+
+def _as_local_time(value: datetime, timezone: ZoneInfo) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone)
+    return value.astimezone(timezone)
