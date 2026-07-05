@@ -209,11 +209,11 @@ async def text_input(message: Message) -> None:
 
         if pending == "threshold":
             if not 0 <= value <= 100:
-                await message.answer("Поріг має бути від 0 до 100.", reply_markup=cancel_keyboard())
+                await message.answer("Поріг має бути від 0% до 100%.", reply_markup=cancel_keyboard())
                 return
             await repo.update_threshold(message.from_user.id, value)
             await session.commit()
-            await message.answer(f"Поріг балів оновлено: {value}/100.")
+            await message.answer(f"Поріг прогнозу оновлено: {value}%.")
         elif pending == "lead_time":
             if not 15 <= value <= 180:
                 await message.answer("Час завчасного сповіщення має бути від 15 до 180 хвилин.", reply_markup=cancel_keyboard())
@@ -297,7 +297,7 @@ async def set_pending(bot: Bot, chat_id: int, user_id: int, pending: str) -> Non
         await session.commit()
 
     if pending == "threshold":
-        text = "Введіть поріг балів від 0 до 100."
+        text = "Введіть поріг прогнозу від 0% до 100%."
     else:
         text = "Введіть, за скільки хвилин до заходу сонця нагадати: від 15 до 180."
     await bot.send_message(chat_id, text, reply_markup=cancel_keyboard())
