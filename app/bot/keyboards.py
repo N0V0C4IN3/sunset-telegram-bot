@@ -31,7 +31,7 @@ def settings_keyboard(subscribed: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="🎚 Поріг балів", callback_data="set_threshold"),
+                InlineKeyboardButton(text="🎚 Поріг прогнозу", callback_data="set_threshold"),
                 InlineKeyboardButton(text="⏰ Час завчасно", callback_data="set_lead_time"),
             ],
             [
