@@ -10,6 +10,7 @@ A self-hosted Telegram bot that predicts whether today's sunset is likely to be 
 - One-time Telegram location sharing.
 - Automatic timezone detection from coordinates.
 - Sunsethue forecast scores with Open-Meteo fallback.
+- Automatic return to Sunsethue once it recovers from an outage.
 - Numeric sunset score, local sunset time, and short explanation.
 - Button-driven settings with validated manual input.
 - Opt-in notifications before promising sunsets.
@@ -57,6 +58,8 @@ SUNSETHUE_FALLBACK_API_KEY=optional-second-api-key
 `LOCATION_ENCRYPTION_KEY` is used to encrypt latitude and longitude before storing them in Postgres. If this key changes, saved user locations cannot be decrypted and users must share location again.
 
 When `SUNSETHUE_API_KEY` is configured, the bot sends saved coordinates to Sunsethue for sunset quality, time, direction, and magic-hour forecasts. If the primary key hits its daily quota, the bot retries with `SUNSETHUE_FALLBACK_API_KEY` when configured. If Sunsethue is unavailable, returns no model data, or no key is configured, the bot falls back to Open-Meteo and its local scoring logic. Cached Sunsethue forecasts are refreshed after the next expected model update time.
+
+An Open-Meteo forecast stored because Sunsethue was unavailable is treated as provisional. The next time that forecast is needed, whether from `/today` or from the notification scan, the bot re-asks Sunsethue first and serves its answer if it has recovered; otherwise the stored Open-Meteo forecast is served unchanged. A score can therefore improve between two checks. When Sunsethue fails repeatedly the bot stops asking for a short cooldown, and when every API key has spent its daily quota it waits until the next UTC day instead.
 
 The migration to encrypted coordinates removes existing plaintext latitude and longitude columns. Existing users should share their location again after upgrading.
 
