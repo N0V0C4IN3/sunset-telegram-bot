@@ -8,6 +8,7 @@ from app.config import get_settings
 from app.db.session import create_session_factory
 from app.logging_config import configure_logging
 from app.services.scheduler import notification_loop
+from app.services.sunsethue import SunsethueClient
 from app.services.weather import OpenMeteoClient
 
 logger = logging.getLogger(__name__)
@@ -21,11 +22,19 @@ async def main() -> None:
 
     session_factory = create_session_factory(settings)
     weather_client = OpenMeteoClient()
+    # One long-lived client: it owns the circuit breaker, which is only
+    # meaningful if every code path shares the same instance.
+    sunsethue_client = SunsethueClient(
+        settings.sunsethue_api_key,
+        settings.sunsethue_fallback_api_key,
+    )
     bot = Bot(token=settings.telegram_bot_token)
     dispatcher = Dispatcher()
-    dispatcher.include_router(setup_router(session_factory, settings, weather_client))
+    dispatcher.include_router(setup_router(session_factory, settings, weather_client, sunsethue_client))
 
-    scheduler_task = asyncio.create_task(notification_loop(bot, session_factory, settings, weather_client))
+    scheduler_task = asyncio.create_task(
+        notification_loop(bot, session_factory, settings, weather_client, sunsethue_client)
+    )
     logger.info("bot_starting")
     try:
         await dispatcher.start_polling(bot)

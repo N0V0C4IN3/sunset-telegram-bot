@@ -11,6 +11,7 @@ from app.bot.messages import format_forecast, score_info_text, settings_text
 from app.config import Settings
 from app.db.repository import Repository
 from app.services.forecast_service import ForecastService
+from app.services.sunsethue import SunsethueClient
 from app.services.timezone import timezone_for_coordinates
 from app.services.weather import OpenMeteoClient, WeatherError
 
@@ -20,13 +21,20 @@ router = Router()
 _session_factory: async_sessionmaker | None = None
 _settings: Settings | None = None
 _weather_client: OpenMeteoClient | None = None
+_sunsethue_client: SunsethueClient | None = None
 
 
-def setup_router(session_factory: async_sessionmaker, settings: Settings, weather_client: OpenMeteoClient) -> Router:
-    global _session_factory, _settings, _weather_client
+def setup_router(
+    session_factory: async_sessionmaker,
+    settings: Settings,
+    weather_client: OpenMeteoClient,
+    sunsethue_client: SunsethueClient,
+) -> Router:
+    global _session_factory, _settings, _weather_client, _sunsethue_client
     _session_factory = session_factory
     _settings = settings
     _weather_client = weather_client
+    _sunsethue_client = sunsethue_client
     return router
 
 
@@ -50,6 +58,12 @@ def weather_client() -> OpenMeteoClient:
     if _weather_client is None:
         raise RuntimeError("Weather client is not configured")
     return _weather_client
+
+
+def sunsethue_client() -> SunsethueClient:
+    if _sunsethue_client is None:
+        raise RuntimeError("Sunsethue client is not configured")
+    return _sunsethue_client
 
 
 async def answer_callback(callback: CallbackQuery, text: str | None = None) -> None:
@@ -236,7 +250,12 @@ async def send_today(bot: Bot, chat_id: int, user_id: int) -> None:
         subscribed = user.settings.subscribed
         timezone = user.timezone
         try:
-            result = await ForecastService(session, settings, weather_client()).today_for_user(user)
+            result = await ForecastService(
+                session,
+                settings,
+                weather_client(),
+                sunsethue_client(),
+            ).today_for_user(user)
             await session.commit()
         except WeatherError:
             logger.warning("forecast_unavailable")

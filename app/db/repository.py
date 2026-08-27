@@ -93,6 +93,7 @@ class Repository:
         self,
         user_id: int,
         forecast_date: date,
+        provider: str,
         sunset_at: datetime,
         score: int,
         description: str,
@@ -101,6 +102,7 @@ class Repository:
         statement = insert(ForecastCache).values(
             user_id=user_id,
             forecast_date=forecast_date,
+            provider=provider,
             fetched_at=datetime.now(UTC),
             sunset_at=sunset_at,
             score=score,
@@ -108,6 +110,7 @@ class Repository:
             weather_data=weather_data,
         )
         update_values = {
+            "provider": statement.excluded.provider,
             "fetched_at": statement.excluded.fetched_at,
             "sunset_at": statement.excluded.sunset_at,
             "score": statement.excluded.score,

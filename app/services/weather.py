@@ -7,6 +7,8 @@ import httpx
 
 from app.services.scoring import SunsetScore, score_sunset
 
+PROVIDER_OPEN_METEO = "open_meteo"
+
 
 class WeatherError(RuntimeError):
     pass
@@ -14,6 +16,7 @@ class WeatherError(RuntimeError):
 
 @dataclass(frozen=True)
 class ForecastResult:
+    provider: str
     forecast_date: date
     sunset_at: datetime
     score: int
@@ -46,6 +49,7 @@ class OpenMeteoClient:
 
         scored: SunsetScore = score_sunset(weather_window)
         return ForecastResult(
+            provider=PROVIDER_OPEN_METEO,
             forecast_date=sunset_at.date(),
             sunset_at=sunset_at,
             score=scored.score,

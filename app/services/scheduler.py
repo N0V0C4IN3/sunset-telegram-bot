@@ -10,6 +10,7 @@ from app.bot.messages import format_forecast
 from app.config import Settings
 from app.db.repository import Repository
 from app.services.forecast_service import ForecastService
+from app.services.sunsethue import PROVIDER_SUNSETHUE, SunsethueClient
 from app.services.weather import OpenMeteoClient, WeatherError
 
 logger = logging.getLogger(__name__)
@@ -20,11 +21,18 @@ async def notification_loop(
     session_factory: async_sessionmaker,
     settings: Settings,
     weather_client: OpenMeteoClient,
+    sunsethue_client: SunsethueClient,
 ) -> None:
     interval_seconds = settings.notification_scan_interval_minutes * 60
     while True:
         try:
-            sent = await run_notification_scan(bot, session_factory, settings, weather_client)
+            sent = await run_notification_scan(
+                bot,
+                session_factory,
+                settings,
+                weather_client,
+                sunsethue_client,
+            )
             logger.info("notification_scan_completed sent=%s", sent)
         except asyncio.CancelledError:
             raise
@@ -38,6 +46,7 @@ async def run_notification_scan(
     session_factory: async_sessionmaker,
     settings: Settings,
     weather_client: OpenMeteoClient,
+    sunsethue_client: SunsethueClient,
 ) -> int:
     sent = 0
     async with session_factory() as session:
@@ -49,7 +58,12 @@ async def run_notification_scan(
             if user_settings.last_notified_for_date == local_now.date():
                 continue
             try:
-                forecast = await ForecastService(session, settings, weather_client).today_for_user(user)
+                forecast = await ForecastService(
+                    session,
+                    settings,
+                    weather_client,
+                    sunsethue_client,
+                ).today_for_user(user)
             except WeatherError:
                 logger.warning("forecast_unavailable_during_notification")
                 continue
@@ -59,7 +73,10 @@ async def run_notification_scan(
             if not (notify_at <= local_now <= scan_window_end):
                 continue
             if forecast.score < user_settings.threshold:
-                await repo.mark_notified(user.id, local_now.date())
+                # A provisional score must not consume the day: Sunsethue may yet
+                # recover and report a sunset worth sending.
+                if not _is_provisional(forecast, sunsethue_client):
+                    await repo.mark_notified(user.id, local_now.date())
                 continue
 
             await bot.send_message(user.id, format_forecast(forecast, user.timezone))
@@ -71,3 +88,8 @@ async def run_notification_scan(
         if deleted:
             logger.info("old_forecasts_deleted count=%s", deleted)
     return sent
+
+
+def _is_provisional(forecast, sunsethue_client: SunsethueClient) -> bool:
+    """True when Sunsethue could have answered but something else did."""
+    return sunsethue_client.is_configured and forecast.provider != PROVIDER_SUNSETHUE

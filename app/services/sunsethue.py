@@ -1,9 +1,17 @@
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 import httpx
 
 from app.services.weather import ForecastResult, WeatherError
+
+PROVIDER_SUNSETHUE = "sunsethue"
+
+# Sunsethue behaves the same on every deployment, so these stay constants rather
+# than settings. Quota is separated from unreachability on purpose: a daily
+# allowance recovers at the provider's own boundary, not after a short wait.
+BREAKER_FAILURE_THRESHOLD = 5
+BREAKER_COOLDOWN = timedelta(minutes=15)
 
 
 class SunsethueError(WeatherError):
@@ -14,16 +22,66 @@ class SunsethueQuotaError(SunsethueError):
     pass
 
 
+class _Breaker:
+    """Tracks whether Sunsethue is worth asking, shared across every user."""
+
+    def __init__(self) -> None:
+        self._consecutive_failures = 0
+        self._blocked_until: datetime | None = None
+
+    def allows(self, now: datetime) -> bool:
+        if self._blocked_until is None:
+            return True
+        if now < self._blocked_until:
+            return False
+        # Cooldown lapsed. The failure count deliberately survives, so the single
+        # probe this permits re-trips the breaker if it fails.
+        self._blocked_until = None
+        return True
+
+    def record_success(self) -> None:
+        self._consecutive_failures = 0
+        self._blocked_until = None
+
+    def record_failure(self, now: datetime) -> None:
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= BREAKER_FAILURE_THRESHOLD:
+            self._blocked_until = now + BREAKER_COOLDOWN
+
+    def record_quota_exhaustion(self, now: datetime) -> None:
+        self._consecutive_failures = 0
+        self._blocked_until = _next_utc_midnight(now)
+
+
 class SunsethueClient:
     event_url = "https://api.sunsethue.com/event"
 
     def __init__(self, api_key: str, fallback_api_key: str = "") -> None:
         self.api_keys = [key for key in [api_key, fallback_api_key] if key]
+        self._breaker = _Breaker()
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(self.api_keys)
 
     async def forecast_for_today(self, latitude: float, longitude: float, timezone: str) -> ForecastResult:
         if not self.api_keys:
             raise SunsethueError("Sunsethue API key is not configured")
+        if not self._breaker.allows(datetime.now(UTC)):
+            raise SunsethueError("Sunsethue is cooling down after repeated failures")
 
+        try:
+            result = await self._forecast_for_today(latitude, longitude, timezone)
+        except SunsethueQuotaError:
+            self._breaker.record_quota_exhaustion(datetime.now(UTC))
+            raise
+        except SunsethueError:
+            self._breaker.record_failure(datetime.now(UTC))
+            raise
+        self._breaker.record_success()
+        return result
+
+    async def _forecast_for_today(self, latitude: float, longitude: float, timezone: str) -> ForecastResult:
         tz = ZoneInfo(timezone)
         local_now = datetime.now(tz)
         local_today = local_now.date()
@@ -60,7 +118,7 @@ class SunsethueClient:
                 continue
 
         if quota_errors:
-            raise SunsethueError("All Sunsethue API keys exceeded their quota")
+            raise SunsethueQuotaError("All Sunsethue API keys exceeded their quota")
         raise SunsethueError("Sunsethue API key is not configured")
 
     async def _fetch_event_with_key(self, client: httpx.AsyncClient, params: dict, api_key: str) -> dict:
@@ -105,12 +163,17 @@ class SunsethueClient:
             "fetched_at": payload.get("time"),
         }
         return ForecastResult(
+            provider=PROVIDER_SUNSETHUE,
             forecast_date=sunset_at.astimezone(ZoneInfo(timezone)).date(),
             sunset_at=sunset_at,
             score=score,
             description=_description_for_quality(quality_text, data, timezone),
             weather_data=weather_data,
         )
+
+
+def _next_utc_midnight(now: datetime) -> datetime:
+    return datetime.combine(now.date() + timedelta(days=1), time(0, tzinfo=UTC))
 
 
 def _parse_utc_datetime(value: str) -> datetime:
