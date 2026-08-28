@@ -5,9 +5,17 @@ from zoneinfo import ZoneInfo
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, ReplyKeyboardRemove
+from aiogram.types import (
+    BufferedInputFile,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InputMediaPhoto,
+    Message,
+    ReplyKeyboardRemove,
+)
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from app.bot.card import render_forecast_card
 from app.bot.keyboards import cancel_keyboard, location_keyboard, main_keyboard, settings_keyboard
 from app.bot.messages import format_forecast, score_info_text, settings_text
 from app.config import Settings
@@ -78,18 +86,35 @@ async def answer_callback(callback: CallbackQuery, text: str | None = None) -> N
         logger.info("stale_callback_ignored")
 
 
+def from_photo(callback: CallbackQuery) -> bool:
+    """True when the callback came from a card, which cannot become text."""
+    return bool(callback.message and callback.message.photo)
+
+
 async def send_or_edit(
     bot: Bot,
     chat_id: int,
     message_id: int | None,
     text: str,
     reply_markup: InlineKeyboardMarkup | None = None,
+    replace: bool = False,
 ) -> None:
     """Edit the message a callback came from; send a fresh one for commands.
 
     Editing keeps the chat from filling with stacked keyboards. Telegram rejects
     an edit that changes nothing, which is a no-op here rather than an error.
+
+    `replace` is for the one transition that cannot be an edit: editMessageText
+    only accepts text, rich and game messages, so a card has to be deleted and a
+    text message sent in its place.
     """
+    if message_id is not None and replace:
+        try:
+            await bot.delete_message(chat_id, message_id)
+        except TelegramBadRequest:
+            logger.info("card_delete_failed")
+        message_id = None
+
     if message_id is not None:
         try:
             await bot.edit_message_text(
@@ -104,6 +129,36 @@ async def send_or_edit(
                 return
             logger.info("message_edit_failed falling_back=send")
     await bot.send_message(chat_id, text, reply_markup=reply_markup)
+
+
+async def send_or_edit_card(
+    bot: Bot,
+    chat_id: int,
+    message_id: int | None,
+    png: bytes,
+    caption: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> None:
+    """Show the score card, editing in place when we came from a callback.
+
+    editMessageMedia replaces a text message with media as well as swapping one
+    photo for another, so both /settings -> card and card -> card edit cleanly.
+    """
+    photo = BufferedInputFile(png, filename="sunset.png")
+    if message_id is not None:
+        try:
+            await bot.edit_message_media(
+                chat_id=chat_id,
+                message_id=message_id,
+                media=InputMediaPhoto(media=photo, caption=caption),
+                reply_markup=reply_markup,
+            )
+            return
+        except TelegramBadRequest as exc:
+            if "message is not modified" in str(exc):
+                return
+            logger.info("card_edit_failed falling_back=send")
+    await bot.send_photo(chat_id, photo, caption=caption, reply_markup=reply_markup)
 
 
 @router.message(Command("start"))
@@ -200,14 +255,16 @@ async def tomorrow_callback(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "settings")
 async def settings_callback(callback: CallbackQuery) -> None:
     await answer_callback(callback)
-    await show_settings(callback.bot, callback.message.chat.id, callback.from_user.id, callback.message.message_id)
+    await show_settings(
+        callback.bot, callback.message.chat.id, callback.from_user.id, callback.message.message_id, from_photo(callback)
+    )
 
 
 @router.callback_query(F.data == "subscribe")
 async def subscribe_callback(callback: CallbackQuery) -> None:
     await answer_callback(callback)
     await set_subscription(
-        callback.bot, callback.message.chat.id, callback.from_user.id, True, callback.message.message_id
+        callback.bot, callback.message.chat.id, callback.from_user.id, True, callback.message.message_id, from_photo(callback)
     )
 
 
@@ -215,7 +272,7 @@ async def subscribe_callback(callback: CallbackQuery) -> None:
 async def unsubscribe_callback(callback: CallbackQuery) -> None:
     await answer_callback(callback)
     await set_subscription(
-        callback.bot, callback.message.chat.id, callback.from_user.id, False, callback.message.message_id
+        callback.bot, callback.message.chat.id, callback.from_user.id, False, callback.message.message_id, from_photo(callback)
     )
 
 
@@ -229,6 +286,7 @@ async def score_info_callback(callback: CallbackQuery) -> None:
         callback.message.message_id,
         score_info_text(),
         main_keyboard(subscribed),
+        replace=from_photo(callback),
     )
 
 
@@ -236,7 +294,7 @@ async def score_info_callback(callback: CallbackQuery) -> None:
 async def set_threshold(callback: CallbackQuery) -> None:
     await answer_callback(callback)
     await set_pending(
-        callback.bot, callback.message.chat.id, callback.from_user.id, "threshold", callback.message.message_id
+        callback.bot, callback.message.chat.id, callback.from_user.id, "threshold", callback.message.message_id, from_photo(callback)
     )
 
 
@@ -244,7 +302,7 @@ async def set_threshold(callback: CallbackQuery) -> None:
 async def set_lead_time(callback: CallbackQuery) -> None:
     await answer_callback(callback)
     await set_pending(
-        callback.bot, callback.message.chat.id, callback.from_user.id, "lead_time", callback.message.message_id
+        callback.bot, callback.message.chat.id, callback.from_user.id, "lead_time", callback.message.message_id, from_photo(callback)
     )
 
 
@@ -263,6 +321,7 @@ async def cancel_input(callback: CallbackQuery) -> None:
         callback.message.message_id,
         "Скасовано.",
         main_keyboard(subscribed),
+        replace=from_photo(callback),
     )
 
 
@@ -337,8 +396,16 @@ async def send_today(
     # Offer Завтра only while today's sunset is still ahead; once it passes,
     # Сьогодні already serves tomorrow and there is no further day to show.
     show_next_day = result.forecast_date == local_today
-    text = format_forecast(result, timezone, provisional=is_provisional(result, sunsethue_client()))
-    await send_or_edit(bot, chat_id, message_id, text, main_keyboard(subscribed, show_next_day=show_next_day))
+    caption = format_forecast(result, timezone, provisional=is_provisional(result, sunsethue_client()))
+    png = await render_forecast_card(result, timezone)
+    await send_or_edit_card(
+        bot,
+        chat_id,
+        message_id,
+        png,
+        caption,
+        main_keyboard(subscribed, show_next_day=show_next_day),
+    )
 
 
 async def set_subscription(
@@ -347,6 +414,7 @@ async def set_subscription(
     user_id: int,
     subscribed: bool,
     message_id: int | None = None,
+    replace: bool = False,
 ) -> None:
     settings = app_settings()
     async with open_session() as session:
@@ -368,10 +436,12 @@ async def set_subscription(
         )
     else:
         text = "Сповіщення увімкнено." if subscribed else "Сповіщення вимкнено."
-        await send_or_edit(bot, chat_id, message_id, text, main_keyboard(subscribed))
+        await send_or_edit(bot, chat_id, message_id, text, main_keyboard(subscribed), replace=replace)
 
 
-async def show_settings(bot: Bot, chat_id: int, user_id: int, message_id: int | None = None) -> None:
+async def show_settings(
+    bot: Bot, chat_id: int, user_id: int, message_id: int | None = None, replace: bool = False
+) -> None:
     settings = app_settings()
     async with open_session() as session:
         repo = Repository(session)
@@ -391,10 +461,13 @@ async def show_settings(bot: Bot, chat_id: int, user_id: int, message_id: int | 
         message_id,
         settings_text(threshold, lead_time, subscribed),
         settings_keyboard(subscribed),
+        replace=replace,
     )
 
 
-async def set_pending(bot: Bot, chat_id: int, user_id: int, pending: str, message_id: int | None = None) -> None:
+async def set_pending(
+    bot: Bot, chat_id: int, user_id: int, pending: str, message_id: int | None = None, replace: bool = False
+) -> None:
     async with open_session() as session:
         repo = Repository(session)
         await repo.set_pending_input(user_id, pending)
@@ -404,7 +477,7 @@ async def set_pending(bot: Bot, chat_id: int, user_id: int, pending: str, messag
         text = "Введіть поріг прогнозу від 0% до 100%."
     else:
         text = "Введіть, за скільки хвилин до заходу сонця нагадати: від 15 до 180."
-    await send_or_edit(bot, chat_id, message_id, text, cancel_keyboard())
+    await send_or_edit(bot, chat_id, message_id, text, cancel_keyboard(), replace=replace)
 
 
 async def user_is_subscribed(user_id: int) -> bool:

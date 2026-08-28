@@ -4,8 +4,10 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot
+from aiogram.types import BufferedInputFile
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from app.bot.card import render_forecast_card
 from app.bot.messages import format_forecast
 from app.config import Settings
 from app.db.repository import Repository
@@ -79,9 +81,14 @@ async def run_notification_scan(
                     await repo.mark_notified(user.id, local_now.date())
                 continue
 
-            await bot.send_message(
+            caption = format_forecast(
+                forecast, user.timezone, provisional=is_provisional(forecast, sunsethue_client)
+            )
+            png = await render_forecast_card(forecast, user.timezone)
+            await bot.send_photo(
                 user.id,
-                format_forecast(forecast, user.timezone, provisional=is_provisional(forecast, sunsethue_client)),
+                BufferedInputFile(png, filename="sunset.png"),
+                caption=caption,
             )
             await repo.mark_notified(user.id, local_now.date())
             sent += 1

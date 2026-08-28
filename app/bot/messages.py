@@ -5,26 +5,13 @@ from app.services.weather import ForecastResult
 
 
 def format_forecast(result: ForecastResult, timezone: str, provisional: bool = False) -> str:
-    tz = ZoneInfo(timezone)
-    sunset_at = result.sunset_at
-    if sunset_at.tzinfo is None:
-        sunset_at = sunset_at.replace(tzinfo=tz)
-    else:
-        sunset_at = sunset_at.astimezone(tz)
+    date_label = day_label(result, timezone)
 
-    today = datetime.now(tz).date()
-    if result.forecast_date == today:
-        date_label = "сьогодні"
-    elif (result.forecast_date - today).days == 1:
-        date_label = "завтра"
-    else:
-        date_label = result.forecast_date.strftime("%d.%m.%Y")
-
-    sunset_time = sunset_at.strftime("%H:%M")
+    # The card image already carries the score, the day and the sunset time.
+    # The caption repeats them anyway: it is what a screen reader announces and
+    # what the chat list previews, so it has to stand on its own.
     lines = [
-        f"🌅 Захід сонця {date_label} ({result.forecast_date:%d.%m.%Y})",
-        f"{score_bar(result.score)} {result.score}%",
-        f"Час заходу: {sunset_time}",
+        f"🌅 Захід сонця {date_label} ({result.forecast_date:%d.%m.%Y}): {result.score}%",
         "",
         result.description,
     ]
@@ -37,10 +24,26 @@ def format_forecast(result: ForecastResult, timezone: str, provisional: bool = F
     return "\n".join(lines)
 
 
-def score_bar(score: int, width: int = 10) -> str:
-    """A ten-cell band so the number reads at a glance."""
-    filled = max(0, min(width, round(score / 100 * width)))
-    return "█" * filled + "░" * (width - filled)
+def day_label(result: ForecastResult, timezone: str) -> str:
+    """The word the card prints under the score."""
+    today = datetime.now(ZoneInfo(timezone)).date()
+    if result.forecast_date == today:
+        return "сьогодні"
+    if (result.forecast_date - today).days == 1:
+        return "завтра"
+    return result.forecast_date.strftime("%d.%m.%Y")
+
+
+def local_sunset_time(result: ForecastResult, timezone: str) -> str:
+    """HH:MM in the user's zone. Open-Meteo returns naive local times, Sunsethue
+    returns UTC, so the two need different conversions."""
+    tz = ZoneInfo(timezone)
+    sunset_at = result.sunset_at
+    if sunset_at.tzinfo is None:
+        sunset_at = sunset_at.replace(tzinfo=tz)
+    else:
+        sunset_at = sunset_at.astimezone(tz)
+    return sunset_at.strftime("%H:%M")
 
 
 def settings_text(threshold: int, lead_time: int, subscribed: bool) -> str:
