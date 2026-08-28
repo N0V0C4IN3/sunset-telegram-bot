@@ -28,7 +28,17 @@ class OpenMeteoClient:
     forecast_url = "https://api.open-meteo.com/v1/forecast"
     air_quality_url = "https://air-quality-api.open-meteo.com/v1/air-quality"
 
-    async def forecast_for_today(self, latitude: float, longitude: float, timezone: str) -> ForecastResult:
+    async def forecast_for_today(
+        self,
+        latitude: float,
+        longitude: float,
+        timezone: str,
+        on_date: date | None = None,
+    ) -> ForecastResult:
+        """The next upcoming sunset, or the one on `on_date` when asked for a day.
+
+        The 2-day payload already covers both, so naming a day costs no extra call.
+        """
         tz = ZoneInfo(timezone)
         now = datetime.now(tz)
         async with httpx.AsyncClient(timeout=15) as client:
@@ -38,7 +48,7 @@ class OpenMeteoClient:
 
         try:
             daily = weather_payload["daily"]
-            sunset_at = self._next_relevant_sunset(daily["sunset"], now, tz)
+            sunset_at = self._relevant_sunset(daily["sunset"], now, tz, on_date)
             hourly = weather_payload["hourly"]
         except (KeyError, IndexError, TypeError, ValueError) as exc:
             raise WeatherError("Open-Meteo response did not include expected fields") from exc
@@ -107,16 +117,22 @@ class OpenMeteoClient:
         except httpx.HTTPError:
             return {}
 
-    def _next_relevant_sunset(
+    def _relevant_sunset(
         self,
         sunsets: list[str],
         now: datetime,
         timezone: ZoneInfo,
+        on_date: date | None = None,
     ) -> datetime:
         candidates = [
             datetime.fromisoformat(sunset).replace(tzinfo=timezone)
             for sunset in sunsets
         ]
+        if on_date is not None:
+            for sunset_at in candidates:
+                if sunset_at.date() == on_date:
+                    return sunset_at
+            raise WeatherError("Open-Meteo response did not include the requested day")
         for sunset_at in candidates:
             if sunset_at > now:
                 return sunset_at

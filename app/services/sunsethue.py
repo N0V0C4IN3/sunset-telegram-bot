@@ -64,14 +64,20 @@ class SunsethueClient:
     def is_configured(self) -> bool:
         return bool(self.api_keys)
 
-    async def forecast_for_today(self, latitude: float, longitude: float, timezone: str) -> ForecastResult:
+    async def forecast_for_today(
+        self,
+        latitude: float,
+        longitude: float,
+        timezone: str,
+        on_date: date | None = None,
+    ) -> ForecastResult:
         if not self.api_keys:
             raise SunsethueError("Sunsethue API key is not configured")
         if not self._breaker.allows(datetime.now(UTC)):
             raise SunsethueError("Sunsethue is cooling down after repeated failures")
 
         try:
-            result = await self._forecast_for_today(latitude, longitude, timezone)
+            result = await self._forecast_for_today(latitude, longitude, timezone, on_date)
         except SunsethueQuotaError:
             self._breaker.record_quota_exhaustion(datetime.now(UTC))
             raise
@@ -81,12 +87,22 @@ class SunsethueClient:
         self._breaker.record_success()
         return result
 
-    async def _forecast_for_today(self, latitude: float, longitude: float, timezone: str) -> ForecastResult:
+    async def _forecast_for_today(
+        self,
+        latitude: float,
+        longitude: float,
+        timezone: str,
+        on_date: date | None = None,
+    ) -> ForecastResult:
         tz = ZoneInfo(timezone)
         local_now = datetime.now(tz)
         local_today = local_now.date()
 
         async with httpx.AsyncClient(timeout=15) as client:
+            if on_date is not None:
+                payload = await self._fetch_event(client, latitude, longitude, on_date)
+                return self._parse_event(payload, timezone)
+
             for forecast_date in [local_today, local_today + timedelta(days=1)]:
                 payload = await self._fetch_event(client, latitude, longitude, forecast_date)
                 result = self._parse_event(payload, timezone)

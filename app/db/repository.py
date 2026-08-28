@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 
 from sqlalchemy import delete, select
@@ -78,16 +79,24 @@ class Repository:
             user.settings.pending_input = None
             user.settings.updated_at = datetime.now(UTC)
 
-    async def get_cached_forecast(self, user_id: int, forecast_date: date, ttl_minutes: int) -> ForecastCache | None:
+    async def get_cached_forecasts(
+        self,
+        user_id: int,
+        forecast_dates: Sequence[date],
+        ttl_minutes: int,
+    ) -> list[ForecastCache]:
+        """Rows still inside the TTL for any of `forecast_dates`, soonest first."""
         cutoff = datetime.now(UTC) - timedelta(minutes=ttl_minutes)
         result = await self.session.execute(
-            select(ForecastCache).where(
+            select(ForecastCache)
+            .where(
                 ForecastCache.user_id == user_id,
-                ForecastCache.forecast_date == forecast_date,
+                ForecastCache.forecast_date.in_(forecast_dates),
                 ForecastCache.fetched_at >= cutoff,
             )
+            .order_by(ForecastCache.forecast_date)
         )
-        return result.scalar_one_or_none()
+        return list(result.scalars().all())
 
     async def upsert_forecast(
         self,
