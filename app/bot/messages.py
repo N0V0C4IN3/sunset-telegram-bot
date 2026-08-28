@@ -4,7 +4,7 @@ from zoneinfo import ZoneInfo
 from app.services.weather import ForecastResult
 
 
-def format_forecast(result: ForecastResult, timezone: str) -> str:
+def format_forecast(result: ForecastResult, timezone: str, provisional: bool = False) -> str:
     tz = ZoneInfo(timezone)
     sunset_at = result.sunset_at
     if sunset_at.tzinfo is None:
@@ -21,11 +21,26 @@ def format_forecast(result: ForecastResult, timezone: str) -> str:
         date_label = result.forecast_date.strftime("%d.%m.%Y")
 
     sunset_time = sunset_at.strftime("%H:%M")
-    return (
-        f"🌅 Захід сонця {date_label} ({result.forecast_date:%d.%m.%Y}): {result.score}%\n"
-        f"Час заходу: {sunset_time}\n\n"
-        f"{result.description}"
-    )
+    lines = [
+        f"🌅 Захід сонця {date_label} ({result.forecast_date:%d.%m.%Y})",
+        f"{score_bar(result.score)} {result.score}%",
+        f"Час заходу: {sunset_time}",
+        "",
+        result.description,
+    ]
+    if provisional:
+        lines.append("")
+        lines.append(
+            "⏳ Це попередня оцінка Open-Meteo: Sunsethue зараз не відповідає. "
+            "Загляньте пізніше — бал може змінитися."
+        )
+    return "\n".join(lines)
+
+
+def score_bar(score: int, width: int = 10) -> str:
+    """A ten-cell band so the number reads at a glance."""
+    filled = max(0, min(width, round(score / 100 * width)))
+    return "█" * filled + "░" * (width - filled)
 
 
 def settings_text(threshold: int, lead_time: int, subscribed: bool) -> str:
@@ -46,7 +61,7 @@ def score_info_text() -> str:
         "Коли Open-Meteo підмінив Sunsethue через збій, така оцінка вважається тимчасовою. При наступному запиті бот знову спробує Sunsethue: якщо той уже ожив, ви побачите його прогноз, якщо ні — збережену оцінку Open-Meteo. Тому бал може змінитися між двома натисканнями, і це не тому, що бот передумав.\n\n"
         "Якщо Sunsethue мовчить багато разів поспіль, бот ненадовго перестає його смикати, щоб не змушувати вас чекати даремно. А якщо вичерпано денний ліміт запитів, чекає вже до наступної доби.\n\n"
         "Локальний розрахунок Open-Meteo дивиться не одну годину, а вікно навколо заходу сонця: приблизно дві години до заходу і одну годину після. Найбільшу вагу має час безпосередньо перед заходом.\n\n"
-        "Якщо сьогоднішній захід уже минув, бот автоматично показує прогноз на наступний день і додає дату в повідомлення.\n\n"
+        "Якщо сьогоднішній захід уже минув, бот автоматично показує прогноз на наступний день і додає дату в повідомлення. Поки сьогоднішній захід ще попереду, кнопка «Завтра» показує наступний день; після заходу вона зникає, бо «Сьогодні» вже показує саме його.\n\n"
         "Open-Meteo оцінка складається з п'яти частин:\n"
         "• 30% — баланс хмар: високі й середні хмари можуть дати колір\n"
         "• 25% — відкритість горизонту: багато низьких хмар сильно шкодить\n"

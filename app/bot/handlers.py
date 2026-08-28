@@ -1,16 +1,18 @@
 import logging
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, ReplyKeyboardRemove
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.bot.keyboards import cancel_keyboard, location_keyboard, main_keyboard, settings_keyboard
 from app.bot.messages import format_forecast, score_info_text, settings_text
 from app.config import Settings
 from app.db.repository import Repository
-from app.services.forecast_service import ForecastService
+from app.services.forecast_service import ForecastService, is_provisional
 from app.services.sunsethue import SunsethueClient
 from app.services.timezone import timezone_for_coordinates
 from app.services.weather import OpenMeteoClient, WeatherError
@@ -74,6 +76,34 @@ async def answer_callback(callback: CallbackQuery, text: str | None = None) -> N
         if "query is too old" not in message and "query ID is invalid" not in message:
             raise
         logger.info("stale_callback_ignored")
+
+
+async def send_or_edit(
+    bot: Bot,
+    chat_id: int,
+    message_id: int | None,
+    text: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> None:
+    """Edit the message a callback came from; send a fresh one for commands.
+
+    Editing keeps the chat from filling with stacked keyboards. Telegram rejects
+    an edit that changes nothing, which is a no-op here rather than an error.
+    """
+    if message_id is not None:
+        try:
+            await bot.edit_message_text(
+                text=text,
+                chat_id=chat_id,
+                message_id=message_id,
+                reply_markup=reply_markup,
+            )
+            return
+        except TelegramBadRequest as exc:
+            if "message is not modified" in str(exc):
+                return
+            logger.info("message_edit_failed falling_back=send")
+    await bot.send_message(chat_id, text, reply_markup=reply_markup)
 
 
 @router.message(Command("start"))
@@ -152,44 +182,70 @@ async def settings_command(message: Message) -> None:
 @router.callback_query(F.data == "today")
 async def today_callback(callback: CallbackQuery) -> None:
     await answer_callback(callback)
-    await send_today(callback.bot, callback.message.chat.id, callback.from_user.id)
+    await send_today(callback.bot, callback.message.chat.id, callback.from_user.id, callback.message.message_id)
+
+
+@router.callback_query(F.data == "tomorrow")
+async def tomorrow_callback(callback: CallbackQuery) -> None:
+    await answer_callback(callback)
+    await send_today(
+        callback.bot,
+        callback.message.chat.id,
+        callback.from_user.id,
+        callback.message.message_id,
+        next_day=True,
+    )
 
 
 @router.callback_query(F.data == "settings")
 async def settings_callback(callback: CallbackQuery) -> None:
     await answer_callback(callback)
-    await show_settings(callback.bot, callback.message.chat.id, callback.from_user.id)
+    await show_settings(callback.bot, callback.message.chat.id, callback.from_user.id, callback.message.message_id)
 
 
 @router.callback_query(F.data == "subscribe")
 async def subscribe_callback(callback: CallbackQuery) -> None:
     await answer_callback(callback)
-    await set_subscription(callback.bot, callback.message.chat.id, callback.from_user.id, True)
+    await set_subscription(
+        callback.bot, callback.message.chat.id, callback.from_user.id, True, callback.message.message_id
+    )
 
 
 @router.callback_query(F.data == "unsubscribe")
 async def unsubscribe_callback(callback: CallbackQuery) -> None:
     await answer_callback(callback)
-    await set_subscription(callback.bot, callback.message.chat.id, callback.from_user.id, False)
+    await set_subscription(
+        callback.bot, callback.message.chat.id, callback.from_user.id, False, callback.message.message_id
+    )
 
 
 @router.callback_query(F.data == "score_info")
 async def score_info_callback(callback: CallbackQuery) -> None:
     await answer_callback(callback)
     subscribed = await user_is_subscribed(callback.from_user.id)
-    await callback.message.answer(score_info_text(), reply_markup=main_keyboard(subscribed))
+    await send_or_edit(
+        callback.bot,
+        callback.message.chat.id,
+        callback.message.message_id,
+        score_info_text(),
+        main_keyboard(subscribed),
+    )
 
 
 @router.callback_query(F.data == "set_threshold")
 async def set_threshold(callback: CallbackQuery) -> None:
     await answer_callback(callback)
-    await set_pending(callback.bot, callback.message.chat.id, callback.from_user.id, "threshold")
+    await set_pending(
+        callback.bot, callback.message.chat.id, callback.from_user.id, "threshold", callback.message.message_id
+    )
 
 
 @router.callback_query(F.data == "set_lead_time")
 async def set_lead_time(callback: CallbackQuery) -> None:
     await answer_callback(callback)
-    await set_pending(callback.bot, callback.message.chat.id, callback.from_user.id, "lead_time")
+    await set_pending(
+        callback.bot, callback.message.chat.id, callback.from_user.id, "lead_time", callback.message.message_id
+    )
 
 
 @router.callback_query(F.data == "cancel_input")
@@ -201,7 +257,13 @@ async def cancel_input(callback: CallbackQuery) -> None:
         user = await repo.get_user_with_settings(callback.from_user.id)
         subscribed = bool(user and user.settings and user.settings.subscribed)
         await session.commit()
-    await callback.message.answer("Скасовано.", reply_markup=main_keyboard(subscribed))
+    await send_or_edit(
+        callback.bot,
+        callback.message.chat.id,
+        callback.message.message_id,
+        "Скасовано.",
+        main_keyboard(subscribed),
+    )
 
 
 @router.message(F.text)
@@ -239,7 +301,13 @@ async def text_input(message: Message) -> None:
     await show_settings(message.bot, message.chat.id, message.from_user.id)
 
 
-async def send_today(bot: Bot, chat_id: int, user_id: int) -> None:
+async def send_today(
+    bot: Bot,
+    chat_id: int,
+    user_id: int,
+    message_id: int | None = None,
+    next_day: bool = False,
+) -> None:
     settings = app_settings()
     async with open_session() as session:
         repo = Repository(session)
@@ -249,22 +317,37 @@ async def send_today(bot: Bot, chat_id: int, user_id: int) -> None:
             return
         subscribed = user.settings.subscribed
         timezone = user.timezone
+        local_today = datetime.now(ZoneInfo(timezone)).date()
+        on_date = local_today + timedelta(days=1) if next_day else None
         try:
             result = await ForecastService(
                 session,
                 settings,
                 weather_client(),
                 sunsethue_client(),
-            ).today_for_user(user)
+            ).today_for_user(user, on_date)
             await session.commit()
         except WeatherError:
             logger.warning("forecast_unavailable")
-            await bot.send_message(chat_id, "Прогноз погоди тимчасово недоступний. Спробуйте трохи пізніше.")
+            await send_or_edit(
+                bot, chat_id, message_id, "Прогноз погоди тимчасово недоступний. Спробуйте трохи пізніше."
+            )
             return
-    await bot.send_message(chat_id, format_forecast(result, timezone), reply_markup=main_keyboard(subscribed))
+
+    # Offer Завтра only while today's sunset is still ahead; once it passes,
+    # Сьогодні already serves tomorrow and there is no further day to show.
+    show_next_day = result.forecast_date == local_today
+    text = format_forecast(result, timezone, provisional=is_provisional(result, sunsethue_client()))
+    await send_or_edit(bot, chat_id, message_id, text, main_keyboard(subscribed, show_next_day=show_next_day))
 
 
-async def set_subscription(bot: Bot, chat_id: int, user_id: int, subscribed: bool) -> None:
+async def set_subscription(
+    bot: Bot,
+    chat_id: int,
+    user_id: int,
+    subscribed: bool,
+    message_id: int | None = None,
+) -> None:
     settings = app_settings()
     async with open_session() as session:
         repo = Repository(session)
@@ -285,10 +368,10 @@ async def set_subscription(bot: Bot, chat_id: int, user_id: int, subscribed: boo
         )
     else:
         text = "Сповіщення увімкнено." if subscribed else "Сповіщення вимкнено."
-        await bot.send_message(chat_id, text, reply_markup=main_keyboard(subscribed))
+        await send_or_edit(bot, chat_id, message_id, text, main_keyboard(subscribed))
 
 
-async def show_settings(bot: Bot, chat_id: int, user_id: int) -> None:
+async def show_settings(bot: Bot, chat_id: int, user_id: int, message_id: int | None = None) -> None:
     settings = app_settings()
     async with open_session() as session:
         repo = Repository(session)
@@ -302,14 +385,16 @@ async def show_settings(bot: Bot, chat_id: int, user_id: int) -> None:
         subscribed = user.settings.subscribed
         await session.commit()
 
-    await bot.send_message(
+    await send_or_edit(
+        bot,
         chat_id,
+        message_id,
         settings_text(threshold, lead_time, subscribed),
-        reply_markup=settings_keyboard(subscribed),
+        settings_keyboard(subscribed),
     )
 
 
-async def set_pending(bot: Bot, chat_id: int, user_id: int, pending: str) -> None:
+async def set_pending(bot: Bot, chat_id: int, user_id: int, pending: str, message_id: int | None = None) -> None:
     async with open_session() as session:
         repo = Repository(session)
         await repo.set_pending_input(user_id, pending)
@@ -319,7 +404,7 @@ async def set_pending(bot: Bot, chat_id: int, user_id: int, pending: str) -> Non
         text = "Введіть поріг прогнозу від 0% до 100%."
     else:
         text = "Введіть, за скільки хвилин до заходу сонця нагадати: від 15 до 180."
-    await bot.send_message(chat_id, text, reply_markup=cancel_keyboard())
+    await send_or_edit(bot, chat_id, message_id, text, cancel_keyboard())
 
 
 async def user_is_subscribed(user_id: int) -> bool:
