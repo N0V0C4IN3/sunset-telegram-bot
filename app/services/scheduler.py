@@ -11,6 +11,7 @@ from app.bot.card import render_forecast_card
 from app.bot.messages import format_forecast
 from app.config import Settings
 from app.db.models import User
+from app.health import record_scan
 from app.db.repository import Repository
 from app.services.forecast_service import ForecastService, is_provisional
 from app.services.sunsethue import SunsethueClient
@@ -36,6 +37,9 @@ async def notification_loop(
                 weather_client,
                 sunsethue_client,
             )
+            # Stamped only on a completed pass: the container healthcheck reads
+            # this to tell a wedged loop from a quiet one.
+            record_scan()
             logger.info("notification_scan_completed sent=%s", sent)
         except asyncio.CancelledError:
             raise
