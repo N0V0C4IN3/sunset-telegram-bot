@@ -5,9 +5,12 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-sunset_bot}
       POSTGRES_USER: ${POSTGRES_USER:-sunset_bot}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      # No default: a weak fallback password is worse than a startup failure.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
     ports:
-      - "5435:5432"
+      # Loopback only. Nothing outside the host needs the database, and
+      # publishing on all interfaces exposed it to the LAN and the tailnet.
+      - "127.0.0.1:5435:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
