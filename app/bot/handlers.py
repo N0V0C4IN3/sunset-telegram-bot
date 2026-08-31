@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.bot.card import render_forecast_card
 from app.bot.keyboards import cancel_keyboard, location_keyboard, main_keyboard, settings_keyboard
-from app.bot.messages import format_forecast, score_info_text, settings_text
+from app.bot.messages import format_forecast, location_saved_text, score_info_text, settings_text
 from app.config import Settings
 from app.db.repository import Repository
 from app.services.forecast_service import ForecastService, is_provisional
@@ -30,6 +30,7 @@ from app.services.weather import OpenMeteoClient, WeatherError
 
 logger = logging.getLogger(__name__)
 router = Router()
+
 
 @dataclass(frozen=True)
 class HandlerContext:
@@ -224,18 +225,21 @@ async def save_location(message: Message) -> None:
     timezone = timezone_for_coordinates(latitude, longitude)
     async with open_session() as session:
         repo = Repository(session)
-        await repo.get_or_create_user(
+        existing = await repo.get_or_create_user(
             message.from_user.id,
             settings.default_notification_threshold,
             settings.default_notification_lead_time_minutes,
         )
+        # Read before the save: afterwards there is always a location, so this is
+        # the only moment that can tell a first save from a replacement.
+        replaced = existing.latitude_encrypted is not None and existing.longitude_encrypted is not None
         await repo.save_location(message.from_user.id, latitude, longitude, timezone)
         user = await repo.get_user_with_settings(message.from_user.id)
         subscribed = user.settings.subscribed
         await session.commit()
 
     await message.answer(
-        "Локацію оновлено. Тепер працюю з вашим місцевим часом заходу сонця.",
+        location_saved_text(replaced=replaced),
         reply_markup=ReplyKeyboardRemove(),
     )
     await message.answer("Що робимо далі?", reply_markup=main_keyboard(subscribed))
@@ -492,13 +496,16 @@ async def show_settings(
         threshold = user.settings.threshold
         lead_time = user.settings.lead_time_minutes
         subscribed = user.settings.subscribed
+        # Decrypted for display only; it is never logged.
+        location = repo.decrypt_location(user)
+        timezone = user.timezone
         await session.commit()
 
     await send_or_edit(
         bot,
         chat_id,
         message_id,
-        settings_text(threshold, lead_time, subscribed),
+        settings_text(threshold, lead_time, subscribed, location, timezone),
         settings_keyboard(subscribed),
         replace=replace,
     )
