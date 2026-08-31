@@ -11,3 +11,5 @@ data/
 CLAUDE.md
 CONTEXT.md
 docs/
+.env.bak*
+.env.*.bak

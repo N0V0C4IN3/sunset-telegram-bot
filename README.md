@@ -63,6 +63,39 @@ An Open-Meteo forecast stored because Sunsethue was unavailable is treated as pr
 
 The migration to encrypted coordinates removes existing plaintext latitude and longitude columns. Existing users should share their location again after upgrading.
 
+## Database Credentials
+
+`POSTGRES_PASSWORD` is read from `.env` in two independent places and both must
+agree, or the bot cannot reach its own database: Compose interpolates it into the
+`postgres` service, and the bot connects with `DATABASE_URL`, which embeds the
+same password. `docker-compose.yml` declares no default for it — a weak fallback
+that silently works is worse than a container that refuses to start.
+
+Postgres reads `POSTGRES_PASSWORD` **only when it initialises a new data
+directory**. On a stack that already has a volume, changing `.env` and recreating
+the container does nothing: the database keeps the password it was born with and
+the bot then fails to authenticate. Rotating on a running stack takes two steps,
+in this order:
+
+```bash
+# 1. Change it inside the database, while the stack is still up.
+docker compose exec -T postgres   psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"   -c "ALTER USER \"$POSTGRES_USER\" WITH PASSWORD '<new password>';"
+
+# 2. Update POSTGRES_PASSWORD *and* the password inside DATABASE_URL, then:
+docker compose up -d
+docker compose logs --tail 20 bot     # migrations run, then Start polling
+```
+
+Generate a password from an alphabet with no URL-reserved characters
+(`openssl rand -hex 24`), or percent-encode it inside `DATABASE_URL`.
+
+The published port is bound to `127.0.0.1`. The bot container reaches Postgres
+over the Compose network and does not use the published port at all. Do not
+republish it on `0.0.0.0`: on a host attached to a LAN or a VPN that makes the
+database reachable and writable by every device on either. Coordinates are
+encrypted at rest, but subscriber identifiers and settings are not, and write
+access is enough to destroy the data.
+
 ## V1 Non-Goals
 
 - No live location tracking.
