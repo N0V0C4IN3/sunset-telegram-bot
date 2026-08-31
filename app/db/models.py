@@ -46,6 +46,7 @@ class ForecastCache(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     forecast_date: Mapped[date] = mapped_column(Date, nullable=False)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False, server_default="open_meteo")
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     sunset_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     score: Mapped[int] = mapped_column(Integer, nullable=False)
