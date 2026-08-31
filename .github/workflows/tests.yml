@@ -25,4 +25,7 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      - run: pytest tests -q
+      # `python -m` puts the repo root on sys.path, which is what makes `import app`
+      # resolve. Bare `pytest` does not, and the repo has no pytest config to do it
+      # instead. This matches the command documented in CLAUDE.md.
+      - run: python -m pytest tests -q
