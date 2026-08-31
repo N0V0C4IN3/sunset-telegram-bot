@@ -46,13 +46,35 @@ def local_sunset_time(result: ForecastResult, timezone: str) -> str:
     return sunset_at.strftime("%H:%M")
 
 
-def settings_text(threshold: int, lead_time: int, subscribed: bool) -> str:
+def location_text(location: tuple[float, float] | None, timezone: str | None) -> str:
+    """One line describing the location currently held, for the settings view."""
+    if location is None:
+        return "Локація: ще не збережена"
+    latitude, longitude = location
+    return f"Локація: {latitude:.3f}, {longitude:.3f} ({timezone})"
+
+
+def location_saved_text(*, replaced: bool) -> str:
+    """A first save and a replacement are different events; say which happened."""
+    if replaced:
+        return "Локацію оновлено. Тепер працюю з вашим місцевим часом заходу сонця."
+    return "Локацію збережено. Тепер працюю з вашим місцевим часом заходу сонця."
+
+
+def settings_text(
+    threshold: int,
+    lead_time: int,
+    subscribed: bool,
+    location: tuple[float, float] | None = None,
+    timezone: str | None = None,
+) -> str:
     notification_state = "увімкнено" if subscribed else "вимкнено"
     return (
         "⚙️ Налаштування\n\n"
         f"Сповіщення: {notification_state}\n"
         f"Поріг прогнозу: {threshold}%\n"
-        f"Нагадати до заходу сонця: за {lead_time} хв"
+        f"Нагадати до заходу сонця: за {lead_time} хв\n"
+        f"{location_text(location, timezone)}"
     )
 
 

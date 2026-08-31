@@ -5,20 +5,39 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-sunset_bot}
       POSTGRES_USER: ${POSTGRES_USER:-sunset_bot}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      # No default: a weak fallback password is worse than a startup failure.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
     ports:
-      - "5435:5432"
+      # Loopback only. Nothing outside the host needs the database, and
+      # publishing on all interfaces exposed it to the LAN and the tailnet.
+      - "127.0.0.1:5435:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-sunset_bot} -d $${POSTGRES_DB:-sunset_bot}"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
   bot:
     build: .
     restart: unless-stopped
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     env_file:
       - path: .env
         required: false
+    # The scan loop stamps a file each completed pass; this asserts it is recent,
+    # so a loop that has stopped notifying shows as unhealthy instead of looking
+    # identical to a healthy bot. start_period covers startup and migrations.
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.health"]
+      interval: 5m
+      timeout: 10s
+      retries: 2
+      start_period: 3m
 
 volumes:
   postgres_data:
