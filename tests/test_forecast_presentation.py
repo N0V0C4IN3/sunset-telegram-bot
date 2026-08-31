@@ -126,7 +126,7 @@ def test_the_settings_view_is_the_same_keyboard_with_the_tuning_row():
     plain = callback_data(main_keyboard(True))
     opened = callback_data(settings_keyboard(True))
     assert plain < opened
-    assert {"set_threshold", "set_lead_time"} == opened - plain
+    assert {"set_threshold", "set_lead_time", "change_location"} == opened - plain
 
 
 def test_both_views_offer_the_subscription_toggle_in_one_direction_only():

@@ -25,6 +25,7 @@ def main_keyboard(
                 InlineKeyboardButton(text="⏰ Час завчасно", callback_data="set_lead_time"),
             ]
         )
+        rows.append([InlineKeyboardButton(text="📍 Змінити локацію", callback_data="change_location")])
     rows.append(
         [
             InlineKeyboardButton(

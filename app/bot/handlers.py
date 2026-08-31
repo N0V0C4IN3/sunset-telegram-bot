@@ -208,7 +208,7 @@ async def save_location(message: Message) -> None:
         await session.commit()
 
     await message.answer(
-        "Локацію збережено. Тепер працюю з вашим місцевим часом заходу сонця.",
+        "Локацію оновлено. Тепер працюю з вашим місцевим часом заходу сонця.",
         reply_markup=ReplyKeyboardRemove(),
     )
     await message.answer("Що робимо далі?", reply_markup=main_keyboard(subscribed))
@@ -303,6 +303,18 @@ async def set_lead_time(callback: CallbackQuery) -> None:
     await answer_callback(callback)
     await set_pending(
         callback.bot, callback.message.chat.id, callback.from_user.id, "lead_time", callback.message.message_id, from_photo(callback)
+    )
+
+
+@router.callback_query(F.data == "change_location")
+async def change_location(callback: CallbackQuery) -> None:
+    await answer_callback(callback)
+    # The location prompt is a reply keyboard, which cannot ride on an edit, so
+    # this always sends a new message instead of replacing the settings one.
+    await callback.bot.send_message(
+        callback.message.chat.id,
+        "📍 Поділіться новою локацією, і я перерахую прогноз для неї.",
+        reply_markup=location_keyboard(),
     )
 
 
