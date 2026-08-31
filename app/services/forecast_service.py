@@ -21,8 +21,9 @@ class ForecastService:
         settings: Settings,
         weather_client: OpenMeteoClient,
         sunsethue_client: SunsethueClient,
+        repository: Repository | None = None,
     ) -> None:
-        self.repo = Repository(session)
+        self.repo = repository or Repository(session)
         self.settings = settings
         self.weather_client = weather_client
         self.sunsethue_client = sunsethue_client

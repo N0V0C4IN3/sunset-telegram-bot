@@ -1,4 +1,7 @@
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -28,10 +31,22 @@ from app.services.weather import OpenMeteoClient, WeatherError
 logger = logging.getLogger(__name__)
 router = Router()
 
-_session_factory: async_sessionmaker | None = None
-_settings: Settings | None = None
-_weather_client: OpenMeteoClient | None = None
-_sunsethue_client: SunsethueClient | None = None
+@dataclass(frozen=True)
+class HandlerContext:
+    """Everything the handlers need from the outside world.
+
+    aiogram DI is deliberately not used here (see CLAUDE.md); the handlers resolve
+    their dependencies through one module-level slot instead of four loose globals,
+    so a test can substitute the whole set at once via `handler_context`.
+    """
+
+    session_factory: async_sessionmaker
+    settings: Settings
+    weather: OpenMeteoClient
+    sunsethue: SunsethueClient
+
+
+_context: HandlerContext | None = None
 
 
 def setup_router(
@@ -40,18 +55,36 @@ def setup_router(
     weather_client: OpenMeteoClient,
     sunsethue_client: SunsethueClient,
 ) -> Router:
-    global _session_factory, _settings, _weather_client, _sunsethue_client
-    _session_factory = session_factory
-    _settings = settings
-    _weather_client = weather_client
-    _sunsethue_client = sunsethue_client
+    global _context
+    _context = HandlerContext(session_factory, settings, weather_client, sunsethue_client)
     return router
 
 
+def current_context() -> HandlerContext:
+    if _context is None:
+        raise RuntimeError("Handlers are not configured")
+    return _context
+
+
+@contextmanager
+def handler_context(context: HandlerContext) -> Iterator[HandlerContext]:
+    """Run a block with these dependencies, restoring whatever was there before.
+
+    This is the seam the handler tests use. It still swaps a module-level slot —
+    it does not eliminate it — so it is not safe to run two different contexts
+    concurrently in one process.
+    """
+    global _context
+    previous = _context
+    _context = context
+    try:
+        yield context
+    finally:
+        _context = previous
+
+
 def sessions() -> async_sessionmaker:
-    if _session_factory is None:
-        raise RuntimeError("Session factory is not configured")
-    return _session_factory
+    return current_context().session_factory
 
 
 def open_session():
@@ -59,21 +92,15 @@ def open_session():
 
 
 def app_settings() -> Settings:
-    if _settings is None:
-        raise RuntimeError("Settings are not configured")
-    return _settings
+    return current_context().settings
 
 
 def weather_client() -> OpenMeteoClient:
-    if _weather_client is None:
-        raise RuntimeError("Weather client is not configured")
-    return _weather_client
+    return current_context().weather
 
 
 def sunsethue_client() -> SunsethueClient:
-    if _sunsethue_client is None:
-        raise RuntimeError("Sunsethue client is not configured")
-    return _sunsethue_client
+    return current_context().sunsethue
 
 
 async def answer_callback(callback: CallbackQuery, text: str | None = None) -> None:

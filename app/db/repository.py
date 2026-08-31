@@ -12,9 +12,11 @@ from app.services.location_crypto import LocationCrypto
 
 
 class Repository:
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, location_crypto: LocationCrypto | None = None) -> None:
         self.session = session
-        self.location_crypto = LocationCrypto(get_settings())
+        # Built from global settings when not supplied, which keeps every existing
+        # caller working; tests pass one in rather than reaching for the environment.
+        self.location_crypto = location_crypto or LocationCrypto(get_settings())
 
     async def get_or_create_user(self, user_id: int, threshold: int, lead_time: int) -> User:
         user = await self.session.get(User, user_id, options=(selectinload(User.settings),))
