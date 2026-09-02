@@ -22,9 +22,9 @@ def score_sunset(weather: dict) -> SunsetScore:
     air_quality = weather.get("air_quality") or {}
 
     cloud_composition = (
-        _range_score(high, ideal_min=25, ideal_max=75, hard_min=5, hard_max=95) * 0.45
-        + _range_score(mid, ideal_min=15, ideal_max=60, hard_min=0, hard_max=90) * 0.35
-        + _range_score(cloud, ideal_min=25, ideal_max=80, hard_min=0, hard_max=100) * 0.20
+        _range_score(high, ideal_min=25, ideal_max=75, hard_min=5, hard_max=95) * 0.72
+        + _range_score(mid, ideal_min=15, ideal_max=60, hard_min=0, hard_max=90) * 0.23
+        + _range_score(cloud, ideal_min=25, ideal_max=80, hard_min=0, hard_max=100) * 0.05
     )
     horizon_openness = _inverse_score(low * 0.65 + low_max * 0.35, ideal_max=25, hard_max=90)
     precipitation_score = _inverse_score(precipitation * 0.65 + precipitation_max * 0.35, ideal_max=15, hard_max=70)
@@ -32,11 +32,11 @@ def score_sunset(weather: dict) -> SunsetScore:
     consistency_score = max(0, min(100, consistency))
 
     raw_score = (
-        cloud_composition * 0.30
-        + horizon_openness * 0.25
-        + precipitation_score * 0.20
-        + clarity_score * 0.15
-        + consistency_score * 0.10
+        cloud_composition * 0.73
+        + horizon_openness * 0.04
+        + precipitation_score * 0.02
+        + clarity_score * 0.09
+        + consistency_score * 0.12
     )
 
     score = _apply_caps(
