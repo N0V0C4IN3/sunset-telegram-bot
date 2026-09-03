@@ -86,23 +86,39 @@ def _gauge(image: Image.Image, score: int) -> Image.Image:
     Painting a translucent fill straight onto an RGB image drops the alpha
     silently, which made the unfilled track read as a full ring.
     """
-    layer = Image.new("RGBA", image.size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(layer)
+    mask = Image.new("L", image.size, 0)
+    draw = ImageDraw.Draw(mask)
     centre_x, centre_y, radius = int(WIDTH * 0.78), HEIGHT // 2, 150
     box = [centre_x - radius, centre_y - radius, centre_x + radius, centre_y + radius]
-    draw.arc(box, start=135, end=405, width=26, fill=(255, 255, 255, 70))
+    draw.arc(box, start=135, end=405, width=26, fill=70)
     if score > 0:
-        draw.arc(box, start=135, end=135 + int(270 * score / 100), width=26, fill=(255, 255, 255, 255))
-    return Image.alpha_composite(image.convert("RGBA"), layer).convert("RGB")
+        draw.arc(box, start=135, end=135 + int(270 * score / 100), width=26, fill=255)
+    image.paste((255, 255, 255), (0, 0), mask)
+    return image
+
+
+# Everything above the text is a pure function of the integer score, and the bot
+# renders thousands of cards per process. A full 1024x536 RGB frame is ~1.6 MB,
+# so this is deliberately small: it is here to catch the subscribers who share a
+# score within a scan pass, not to hold all 101 of them.
+@lru_cache(maxsize=12)
+def _background(score: int) -> Image.Image:
+    image = _gauge(_with_glow(_gradient(score), score), score)
+    # The score reading depends on nothing else, so it belongs in the cached
+    # frame; only the day and the sunset time are per-subscriber.
+    ImageDraw.Draw(image).text(
+        (70, HEIGHT // 2 - 40), f"{score}%", font=_font(FONT_BOLD, 170), fill=(255, 255, 255), anchor="lm"
+    )
+    return image
 
 
 def render_card(score: int, day_label: str, sunset_time: str) -> bytes:
     """A PNG of the score card, ready for sendPhoto."""
     score = max(0, min(100, score))
-    image = _gauge(_with_glow(_gradient(score), score), score)
+    # Copied because the cached background must never be drawn on.
+    image = _background(score).copy()
 
     draw = ImageDraw.Draw(image)
-    draw.text((70, HEIGHT // 2 - 40), f"{score}%", font=_font(FONT_BOLD, 170), fill=(255, 255, 255), anchor="lm")
     draw.text((78, HEIGHT // 2 + 78), day_label, font=_font(FONT_REGULAR, 44), fill=(248, 244, 240), anchor="lm")
     draw.text(
         (78, HEIGHT // 2 + 134),
@@ -113,7 +129,7 @@ def render_card(score: int, day_label: str, sunset_time: str) -> bytes:
     )
 
     buffer = io.BytesIO()
-    image.save(buffer, format="PNG", optimize=True)
+    image.save(buffer, format="PNG", compress_level=1)
     return buffer.getvalue()
 
 

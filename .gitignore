@@ -13,3 +13,6 @@ CONTEXT.md
 docs/
 .env.bak*
 .env.*.bak
+
+# Autoresearch session files (local-only, like the other agent docs)
+.auto/
