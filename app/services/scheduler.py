@@ -8,6 +8,7 @@ from aiogram.types import BufferedInputFile
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.bot.card import render_forecast_card
+from app.bot.keyboards import main_keyboard
 from app.bot.messages import format_forecast
 from app.config import Settings
 from app.db.models import User
@@ -78,10 +79,17 @@ async def notify_subscriber(
 
     caption = format_forecast(forecast, user.timezone, provisional=provisional)
     png = await render_forecast_card(forecast, user.timezone)
+    # The same keyboard /today shows, so Сьогодні/Завтра edit the notification
+    # in place. Завтра follows the same rule: only while today's sunset is ahead.
+    keyboard = main_keyboard(
+        user_settings.subscribed,
+        show_next_day=forecast.forecast_date == local_now.date(),
+    )
     await bot.send_photo(
         user.id,
         BufferedInputFile(png, filename="sunset.png"),
         caption=caption,
+        reply_markup=keyboard,
     )
     await repo.mark_notified(user.id, local_now.date())
     return True
