@@ -136,3 +136,23 @@ def test_both_views_offer_the_subscription_toggle_in_one_direction_only():
     assert "unsubscribe" in callback_data(main_keyboard(True))
     assert "subscribe" not in callback_data(main_keyboard(True))
     assert "subscribe" in callback_data(main_keyboard(False))
+
+
+def test_no_keyboard_row_is_crowded_enough_to_truncate_on_a_phone():
+    # Telegram splits a row evenly and ellipsises labels that do not fit.
+    for subscribed in (True, False):
+        for show_next_day in (True, False):
+            for keyboard in (
+                main_keyboard(subscribed, show_next_day=show_next_day),
+                settings_keyboard(subscribed, show_next_day=show_next_day),
+            ):
+                assert all(len(row) <= 2 for row in keyboard.inline_keyboard)
+
+
+def test_the_longer_labels_have_a_row_to_themselves():
+    rows = [[button.callback_data for button in row] for row in main_keyboard(True, show_next_day=True).inline_keyboard]
+    assert rows[0] == ["today", "tomorrow"]
+    assert ["sunrise"] in rows
+    assert ["settings"] in rows
+    assert ["score_info"] in rows
+    assert rows.index(["score_info"]) == rows.index(["settings"]) + 1
