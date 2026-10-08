@@ -49,12 +49,16 @@ def local_event_time(result: ForecastResult, timezone: str) -> str:
     return event_at.strftime("%H:%M")
 
 
-def location_text(location: tuple[float, float] | None, timezone: str | None) -> str:
-    """One line describing the location currently held, for the settings view."""
-    if location is None:
+def location_text(timezone: str | None) -> str:
+    """One line describing the location held, for the settings view.
+
+    Only the timezone derived from it is shown, never the coordinates: the
+    timezone is enough to tell a stale location from a bad forecast.
+    `None` means no location is saved.
+    """
+    if timezone is None:
         return "Локація: ще не збережена"
-    latitude, longitude = location
-    return f"Локація: {latitude:.3f}, {longitude:.3f} ({timezone})"
+    return f"Локація: збережена, часовий пояс {timezone}"
 
 
 def location_saved_text(*, replaced: bool) -> str:
@@ -68,7 +72,6 @@ def settings_text(
     threshold: int,
     lead_time: int,
     subscribed: bool,
-    location: tuple[float, float] | None = None,
     timezone: str | None = None,
 ) -> str:
     notification_state = "увімкнено" if subscribed else "вимкнено"
@@ -77,7 +80,7 @@ def settings_text(
         f"Сповіщення: {notification_state}\n"
         f"Поріг прогнозу: {threshold}%\n"
         f"Нагадати до заходу сонця: за {lead_time} хв\n"
-        f"{location_text(location, timezone)}"
+        f"{location_text(timezone)}"
     )
 
 
