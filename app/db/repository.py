@@ -9,12 +9,15 @@ from sqlalchemy.orm import selectinload
 from app.config import get_settings
 from app.db.models import ForecastCache, User, UserSettings
 from app.services.location_crypto import LocationCrypto
+from app.services.solar import SolarEvent
 
 
 class Repository:
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, location_crypto: LocationCrypto | None = None) -> None:
         self.session = session
-        self.location_crypto = LocationCrypto(get_settings())
+        # Built from global settings when not supplied, which keeps every existing
+        # caller working; tests pass one in rather than reaching for the environment.
+        self.location_crypto = location_crypto or LocationCrypto(get_settings())
 
     async def get_or_create_user(self, user_id: int, threshold: int, lead_time: int) -> User:
         user = await self.session.get(User, user_id, options=(selectinload(User.settings),))
@@ -85,7 +88,11 @@ class Repository:
         forecast_dates: Sequence[date],
         ttl_minutes: int,
     ) -> list[ForecastCache]:
-        """Rows still inside the TTL for any of `forecast_dates`, soonest first."""
+        """Rows of either Solar Event still inside the TTL for any of `forecast_dates`.
+
+        Soonest first. Telling sunrise from sunset is the Cache Verdict's job, where
+        it is a pure, tested rule rather than a clause in a query.
+        """
         cutoff = datetime.now(UTC) - timedelta(minutes=ttl_minutes)
         result = await self.session.execute(
             select(ForecastCache)
@@ -102,8 +109,9 @@ class Repository:
         self,
         user_id: int,
         forecast_date: date,
+        event: SolarEvent,
         provider: str,
-        sunset_at: datetime,
+        event_at: datetime,
         score: int,
         description: str,
         weather_data: dict,
@@ -111,9 +119,10 @@ class Repository:
         statement = insert(ForecastCache).values(
             user_id=user_id,
             forecast_date=forecast_date,
+            event=event,
             provider=provider,
             fetched_at=datetime.now(UTC),
-            sunset_at=sunset_at,
+            event_at=event_at,
             score=score,
             description=description,
             weather_data=weather_data,
@@ -121,14 +130,14 @@ class Repository:
         update_values = {
             "provider": statement.excluded.provider,
             "fetched_at": statement.excluded.fetched_at,
-            "sunset_at": statement.excluded.sunset_at,
+            "event_at": statement.excluded.event_at,
             "score": statement.excluded.score,
             "description": statement.excluded.description,
             "weather_data": statement.excluded.weather_data,
         }
         await self.session.execute(
             statement.on_conflict_do_update(
-                constraint="uq_forecast_cache_user_date",
+                constraint="uq_forecast_cache_user_date_event",
                 set_=update_values,
             )
         )

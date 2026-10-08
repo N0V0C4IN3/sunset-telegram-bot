@@ -1,4 +1,7 @@
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -17,10 +20,12 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.bot.card import render_forecast_card
 from app.bot.keyboards import cancel_keyboard, location_keyboard, main_keyboard, settings_keyboard
-from app.bot.messages import format_forecast, score_info_text, settings_text
+from app.bot.messages import format_forecast, location_saved_text, score_info_text, settings_text
 from app.config import Settings
+from app.db.models import User
 from app.db.repository import Repository
-from app.services.forecast_service import ForecastService, is_provisional
+from app.services.forecast_service import ForecastService, is_provisional, next_day_available
+from app.services.solar import SolarEvent
 from app.services.sunsethue import SunsethueClient
 from app.services.timezone import timezone_for_coordinates
 from app.services.weather import OpenMeteoClient, WeatherError
@@ -28,10 +33,44 @@ from app.services.weather import OpenMeteoClient, WeatherError
 logger = logging.getLogger(__name__)
 router = Router()
 
-_session_factory: async_sessionmaker | None = None
-_settings: Settings | None = None
-_weather_client: OpenMeteoClient | None = None
-_sunsethue_client: SunsethueClient | None = None
+
+@dataclass(frozen=True)
+class HandlerContext:
+    """Everything the handlers need from the outside world.
+
+    aiogram DI is deliberately not used here (see CLAUDE.md); the handlers resolve
+    their dependencies through one module-level slot instead of four loose globals,
+    so a test can substitute the whole set at once via `handler_context`.
+    """
+
+    session_factory: async_sessionmaker
+    settings: Settings
+    weather: OpenMeteoClient
+    sunsethue: SunsethueClient
+
+
+_context: HandlerContext | None = None
+
+
+@dataclass(frozen=True)
+class CardRequest:
+    """Which forecast card a button asks for.
+
+    `days_ahead` names a day; None means the next upcoming event, whichever day
+    that falls on. There is deliberately no "tomorrow's sunrise": after dawn the
+    next sunrise already is tomorrow's.
+    """
+
+    event: SolarEvent
+    days_ahead: int | None = None
+
+
+NEXT_SUNSET = CardRequest(SolarEvent.SUNSET)
+TOMORROWS_SUNSET = CardRequest(SolarEvent.SUNSET, days_ahead=1)
+NEXT_SUNRISE = CardRequest(SolarEvent.SUNRISE)
+
+# The callback data each card button carries.
+CARD_BUTTONS = {"today": NEXT_SUNSET, "tomorrow": TOMORROWS_SUNSET, "sunrise": NEXT_SUNRISE}
 
 
 def setup_router(
@@ -40,18 +79,36 @@ def setup_router(
     weather_client: OpenMeteoClient,
     sunsethue_client: SunsethueClient,
 ) -> Router:
-    global _session_factory, _settings, _weather_client, _sunsethue_client
-    _session_factory = session_factory
-    _settings = settings
-    _weather_client = weather_client
-    _sunsethue_client = sunsethue_client
+    global _context
+    _context = HandlerContext(session_factory, settings, weather_client, sunsethue_client)
     return router
 
 
+def current_context() -> HandlerContext:
+    if _context is None:
+        raise RuntimeError("Handlers are not configured")
+    return _context
+
+
+@contextmanager
+def handler_context(context: HandlerContext) -> Iterator[HandlerContext]:
+    """Run a block with these dependencies, restoring whatever was there before.
+
+    This is the seam the handler tests use. It still swaps a module-level slot —
+    it does not eliminate it — so it is not safe to run two different contexts
+    concurrently in one process.
+    """
+    global _context
+    previous = _context
+    _context = context
+    try:
+        yield context
+    finally:
+        _context = previous
+
+
 def sessions() -> async_sessionmaker:
-    if _session_factory is None:
-        raise RuntimeError("Session factory is not configured")
-    return _session_factory
+    return current_context().session_factory
 
 
 def open_session():
@@ -59,21 +116,15 @@ def open_session():
 
 
 def app_settings() -> Settings:
-    if _settings is None:
-        raise RuntimeError("Settings are not configured")
-    return _settings
+    return current_context().settings
 
 
 def weather_client() -> OpenMeteoClient:
-    if _weather_client is None:
-        raise RuntimeError("Weather client is not configured")
-    return _weather_client
+    return current_context().weather
 
 
 def sunsethue_client() -> SunsethueClient:
-    if _sunsethue_client is None:
-        raise RuntimeError("Sunsethue client is not configured")
-    return _sunsethue_client
+    return current_context().sunsethue
 
 
 async def answer_callback(callback: CallbackQuery, text: str | None = None) -> None:
@@ -173,6 +224,7 @@ async def start(message: Message) -> None:
         )
         has_location = user.latitude_encrypted is not None and user.longitude_encrypted is not None
         subscribed = user.settings.subscribed
+        show_next_day = offers_next_day(repo, user)
         await session.commit()
 
     await message.answer(
@@ -181,7 +233,10 @@ async def start(message: Message) -> None:
         reply_markup=location_keyboard(),
     )
     if has_location:
-        await message.answer("Можна вже перевірити прогноз на сьогодні.", reply_markup=main_keyboard(subscribed))
+        await message.answer(
+            "Можна вже перевірити прогноз на сьогодні.",
+            reply_markup=main_keyboard(subscribed, show_next_day=show_next_day),
+        )
 
 
 @router.message(Command("location"))
@@ -197,26 +252,30 @@ async def save_location(message: Message) -> None:
     timezone = timezone_for_coordinates(latitude, longitude)
     async with open_session() as session:
         repo = Repository(session)
-        await repo.get_or_create_user(
+        existing = await repo.get_or_create_user(
             message.from_user.id,
             settings.default_notification_threshold,
             settings.default_notification_lead_time_minutes,
         )
+        # Read before the save: afterwards there is always a location, so this is
+        # the only moment that can tell a first save from a replacement.
+        replaced = existing.latitude_encrypted is not None and existing.longitude_encrypted is not None
         await repo.save_location(message.from_user.id, latitude, longitude, timezone)
         user = await repo.get_user_with_settings(message.from_user.id)
         subscribed = user.settings.subscribed
+        show_next_day = offers_next_day(repo, user)
         await session.commit()
 
     await message.answer(
-        "Локацію оновлено. Тепер працюю з вашим місцевим часом заходу сонця.",
+        location_saved_text(replaced=replaced),
         reply_markup=ReplyKeyboardRemove(),
     )
-    await message.answer("Що робимо далі?", reply_markup=main_keyboard(subscribed))
+    await message.answer("Що робимо далі?", reply_markup=main_keyboard(subscribed, show_next_day=show_next_day))
 
 
 @router.message(Command("today"))
 async def today_command(message: Message) -> None:
-    await send_today(message.bot, message.chat.id, message.from_user.id)
+    await send_card(message.bot, message.chat.id, message.from_user.id, NEXT_SUNSET)
 
 
 @router.message(Command("subscribe"))
@@ -234,21 +293,15 @@ async def settings_command(message: Message) -> None:
     await show_settings(message.bot, message.chat.id, message.from_user.id)
 
 
-@router.callback_query(F.data == "today")
-async def today_callback(callback: CallbackQuery) -> None:
+@router.callback_query(F.data.in_(CARD_BUTTONS))
+async def card_callback(callback: CallbackQuery) -> None:
     await answer_callback(callback)
-    await send_today(callback.bot, callback.message.chat.id, callback.from_user.id, callback.message.message_id)
-
-
-@router.callback_query(F.data == "tomorrow")
-async def tomorrow_callback(callback: CallbackQuery) -> None:
-    await answer_callback(callback)
-    await send_today(
+    await send_card(
         callback.bot,
         callback.message.chat.id,
         callback.from_user.id,
+        CARD_BUTTONS[callback.data],
         callback.message.message_id,
-        next_day=True,
     )
 
 
@@ -279,13 +332,14 @@ async def unsubscribe_callback(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "score_info")
 async def score_info_callback(callback: CallbackQuery) -> None:
     await answer_callback(callback)
-    subscribed = await user_is_subscribed(callback.from_user.id)
+    subscribed, show_next_day = await keyboard_state(callback.from_user.id)
     await send_or_edit(
         callback.bot,
         callback.message.chat.id,
         callback.message.message_id,
         score_info_text(),
-        main_keyboard(subscribed),
+        # Reached from the settings view, so it keeps that keyboard to go back to.
+        settings_keyboard(subscribed, show_next_day=show_next_day),
         replace=from_photo(callback),
     )
 
@@ -326,13 +380,14 @@ async def cancel_input(callback: CallbackQuery) -> None:
         await repo.set_pending_input(callback.from_user.id, None)
         user = await repo.get_user_with_settings(callback.from_user.id)
         subscribed = bool(user and user.settings and user.settings.subscribed)
+        show_next_day = user is not None and offers_next_day(repo, user)
         await session.commit()
     await send_or_edit(
         callback.bot,
         callback.message.chat.id,
         callback.message.message_id,
         "Скасовано.",
-        main_keyboard(subscribed),
+        main_keyboard(subscribed, show_next_day=show_next_day),
         replace=from_photo(callback),
     )
 
@@ -372,12 +427,12 @@ async def text_input(message: Message) -> None:
     await show_settings(message.bot, message.chat.id, message.from_user.id)
 
 
-async def send_today(
+async def send_card(
     bot: Bot,
     chat_id: int,
     user_id: int,
+    request: CardRequest,
     message_id: int | None = None,
-    next_day: bool = False,
 ) -> None:
     settings = app_settings()
     async with open_session() as session:
@@ -388,15 +443,16 @@ async def send_today(
             return
         subscribed = user.settings.subscribed
         timezone = user.timezone
-        local_today = datetime.now(ZoneInfo(timezone)).date()
-        on_date = local_today + timedelta(days=1) if next_day else None
+        local_now = datetime.now(ZoneInfo(timezone))
+        local_today = local_now.date()
+        on_date = None if request.days_ahead is None else local_today + timedelta(days=request.days_ahead)
         try:
             result = await ForecastService(
                 session,
                 settings,
                 weather_client(),
                 sunsethue_client(),
-            ).today_for_user(user, on_date)
+            ).today_for_user(user, request.event, on_date)
             await session.commit()
         except WeatherError:
             logger.warning("forecast_unavailable")
@@ -405,9 +461,8 @@ async def send_today(
             )
             return
 
-    # Offer Завтра only while today's sunset is still ahead; once it passes,
-    # Сьогодні already serves tomorrow and there is no further day to show.
-    show_next_day = result.forecast_date == local_today
+        show_next_day = offers_next_day(repo, user)
+
     caption = format_forecast(result, timezone, provisional=is_provisional(result, sunsethue_client()))
     png = await render_forecast_card(result, timezone)
     await send_or_edit_card(
@@ -437,6 +492,7 @@ async def set_subscription(
             settings.default_notification_lead_time_minutes,
         )
         has_location = user.latitude_encrypted is not None and user.longitude_encrypted is not None
+        show_next_day = offers_next_day(repo, user)
         await repo.set_subscribed(user_id, subscribed)
         await session.commit()
 
@@ -448,7 +504,8 @@ async def set_subscription(
         )
     else:
         text = "Сповіщення увімкнено." if subscribed else "Сповіщення вимкнено."
-        await send_or_edit(bot, chat_id, message_id, text, main_keyboard(subscribed), replace=replace)
+        keyboard = main_keyboard(subscribed, show_next_day=show_next_day)
+        await send_or_edit(bot, chat_id, message_id, text, keyboard, replace=replace)
 
 
 async def show_settings(
@@ -465,14 +522,17 @@ async def show_settings(
         threshold = user.settings.threshold
         lead_time = user.settings.lead_time_minutes
         subscribed = user.settings.subscribed
+        has_location = user.latitude_encrypted is not None and user.longitude_encrypted is not None
+        timezone = user.timezone if has_location else None
+        show_next_day = offers_next_day(repo, user)
         await session.commit()
 
     await send_or_edit(
         bot,
         chat_id,
         message_id,
-        settings_text(threshold, lead_time, subscribed),
-        settings_keyboard(subscribed),
+        settings_text(threshold, lead_time, subscribed, timezone),
+        settings_keyboard(subscribed, show_next_day=show_next_day),
         replace=replace,
     )
 
@@ -492,8 +552,23 @@ async def set_pending(
     await send_or_edit(bot, chat_id, message_id, text, cancel_keyboard(), replace=replace)
 
 
-async def user_is_subscribed(user_id: int) -> bool:
+def offers_next_day(repo: Repository, user: User) -> bool:
+    """Whether this user's keyboard gets Завтра, wherever the keyboard appears.
+
+    Every view carries the day buttons, so every view applies the same rule as
+    the card; without a saved location there is no sunset to be ahead of.
+    """
+    location = repo.decrypt_location(user)
+    if location is None:
+        return False
+    return next_day_available(location, datetime.now(ZoneInfo(user.timezone)))
+
+
+async def keyboard_state(user_id: int) -> tuple[bool, bool]:
+    """(subscribed, show_next_day) for a view that only needs the keyboard."""
     async with open_session() as session:
         repo = Repository(session)
         user = await repo.get_user_with_settings(user_id)
-        return bool(user and user.settings and user.settings.subscribed)
+        if user is None or user.settings is None:
+            return False, False
+        return user.settings.subscribed, offers_next_day(repo, user)
