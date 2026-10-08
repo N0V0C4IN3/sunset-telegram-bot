@@ -24,6 +24,7 @@ from app.bot.messages import format_forecast, location_saved_text, score_info_te
 from app.config import Settings
 from app.db.repository import Repository
 from app.services.forecast_service import ForecastService, is_provisional
+from app.services.solar import SolarEvent, days_to_ask
 from app.services.sunsethue import SunsethueClient
 from app.services.timezone import timezone_for_coordinates
 from app.services.weather import OpenMeteoClient, WeatherError
@@ -283,6 +284,18 @@ async def tomorrow_callback(callback: CallbackQuery) -> None:
     )
 
 
+@router.callback_query(F.data == "sunrise")
+async def sunrise_callback(callback: CallbackQuery) -> None:
+    await answer_callback(callback)
+    await send_today(
+        callback.bot,
+        callback.message.chat.id,
+        callback.from_user.id,
+        callback.message.message_id,
+        event=SolarEvent.SUNRISE,
+    )
+
+
 @router.callback_query(F.data == "settings")
 async def settings_callback(callback: CallbackQuery) -> None:
     await answer_callback(callback)
@@ -409,6 +422,7 @@ async def send_today(
     user_id: int,
     message_id: int | None = None,
     next_day: bool = False,
+    event: SolarEvent = SolarEvent.SUNSET,
 ) -> None:
     settings = app_settings()
     async with open_session() as session:
@@ -419,7 +433,8 @@ async def send_today(
             return
         subscribed = user.settings.subscribed
         timezone = user.timezone
-        local_today = datetime.now(ZoneInfo(timezone)).date()
+        local_now = datetime.now(ZoneInfo(timezone))
+        local_today = local_now.date()
         on_date = local_today + timedelta(days=1) if next_day else None
         try:
             result = await ForecastService(
@@ -427,7 +442,7 @@ async def send_today(
                 settings,
                 weather_client(),
                 sunsethue_client(),
-            ).today_for_user(user, on_date)
+            ).today_for_user(user, on_date, event)
             await session.commit()
         except WeatherError:
             logger.warning("forecast_unavailable")
@@ -436,9 +451,16 @@ async def send_today(
             )
             return
 
-    # Offer Завтра only while today's sunset is still ahead; once it passes,
-    # Сьогодні already serves tomorrow and there is no further day to show.
-    show_next_day = result.forecast_date == local_today
+        # Offer Завтра only while today's sunset is still ahead; once it passes,
+        # Сьогодні already serves tomorrow and there is no further day to show.
+        if event is SolarEvent.SUNSET:
+            show_next_day = result.forecast_date == local_today
+        else:
+            # A sunrise card says nothing about today's sunset, so work it out
+            # locally rather than spend a call on it.
+            latitude, longitude = repo.decrypt_location(user)
+            show_next_day = days_to_ask(SolarEvent.SUNSET, local_now, latitude, longitude)[0] == local_today
+
     caption = format_forecast(result, timezone, provisional=is_provisional(result, sunsethue_client()))
     png = await render_forecast_card(result, timezone)
     await send_or_edit_card(

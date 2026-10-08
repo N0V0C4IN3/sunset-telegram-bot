@@ -41,14 +41,17 @@ class UserSettings(Base):
 
 class ForecastCache(Base):
     __tablename__ = "forecast_cache"
-    __table_args__ = (UniqueConstraint("user_id", "forecast_date", name="uq_forecast_cache_user_date"),)
+    __table_args__ = (
+        UniqueConstraint("user_id", "forecast_date", "event", name="uq_forecast_cache_user_date_event"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     forecast_date: Mapped[date] = mapped_column(Date, nullable=False)
+    event: Mapped[str] = mapped_column(String(16), nullable=False, server_default="sunset")
     provider: Mapped[str] = mapped_column(String(32), nullable=False, server_default="open_meteo")
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    sunset_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    event_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     score: Mapped[int] = mapped_column(Integer, nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
     weather_data: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)

@@ -1,17 +1,20 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from app.services.solar import SolarEvent
 from app.services.weather import ForecastResult
+
+HEADLINE = {SolarEvent.SUNSET: "🌅 Захід сонця", SolarEvent.SUNRISE: "🌄 Схід сонця"}
 
 
 def format_forecast(result: ForecastResult, timezone: str, provisional: bool = False) -> str:
     date_label = day_label(result, timezone)
 
-    # The card image already carries the score, the day and the sunset time.
+    # The card image already carries the score, the day and the event time.
     # The caption repeats them anyway: it is what a screen reader announces and
     # what the chat list previews, so it has to stand on its own.
     lines = [
-        f"🌅 Захід сонця {date_label} ({result.forecast_date:%d.%m.%Y}): {result.score}%",
+        f"{HEADLINE[result.event]} {date_label} ({result.forecast_date:%d.%m.%Y}): {result.score}%",
         "",
         result.description,
     ]
@@ -34,16 +37,16 @@ def day_label(result: ForecastResult, timezone: str) -> str:
     return result.forecast_date.strftime("%d.%m.%Y")
 
 
-def local_sunset_time(result: ForecastResult, timezone: str) -> str:
+def local_event_time(result: ForecastResult, timezone: str) -> str:
     """HH:MM in the user's zone. Open-Meteo returns naive local times, Sunsethue
     returns UTC, so the two need different conversions."""
     tz = ZoneInfo(timezone)
-    sunset_at = result.sunset_at
-    if sunset_at.tzinfo is None:
-        sunset_at = sunset_at.replace(tzinfo=tz)
+    event_at = result.event_at
+    if event_at.tzinfo is None:
+        event_at = event_at.replace(tzinfo=tz)
     else:
-        sunset_at = sunset_at.astimezone(tz)
-    return sunset_at.strftime("%H:%M")
+        event_at = event_at.astimezone(tz)
+    return event_at.strftime("%H:%M")
 
 
 def location_text(location: tuple[float, float] | None, timezone: str | None) -> str:
@@ -86,6 +89,7 @@ def score_info_text() -> str:
         "Коли Open-Meteo підмінив Sunsethue через збій, така оцінка вважається тимчасовою. При наступному запиті бот знову спробує Sunsethue: якщо той уже ожив, ви побачите його прогноз, якщо ні — збережену оцінку Open-Meteo. Тому бал може змінитися між двома натисканнями, і це не тому, що бот передумав.\n\n"
         "Якщо Sunsethue мовчить багато разів поспіль, бот ненадовго перестає його смикати, щоб не змушувати вас чекати даремно. А якщо вичерпано денний ліміт запитів, чекає вже до наступної доби.\n\n"
         "Локальний розрахунок Open-Meteo дивиться не одну годину, а вікно навколо заходу сонця: приблизно дві години до заходу і одну годину після. Найбільшу вагу має час безпосередньо перед заходом.\n\n"
+        "Кнопка «Світанок» показує найближчий схід сонця: до світанку — сьогоднішній, після нього — завтрашній. Він оцінюється так само, за тією ж шкалою, а в розрахунку Open-Meteo вікно віддзеркалене: приблизно година до сходу і дві години після. Сповіщень про світанок бот не надсилає — лише про захід.\n\n"
         "Якщо сьогоднішній захід уже минув, бот автоматично показує прогноз на наступний день і додає дату в повідомлення. Поки сьогоднішній захід ще попереду, кнопка «Завтра» показує наступний день; після заходу вона зникає, бо «Сьогодні» вже показує саме його.\n\n"
         "Open-Meteo оцінка складається з п'яти частин:\n"
         "• 30% — баланс хмар: високі й середні хмари можуть дати колір\n"

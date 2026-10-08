@@ -6,19 +6,19 @@ from PIL import Image
 
 from app.bot.card import HEIGHT, WIDTH, palette, render_card
 from app.bot.keyboards import main_keyboard, settings_keyboard
-from app.bot.messages import day_label, format_forecast, local_sunset_time
+from app.bot.messages import day_label, format_forecast, local_event_time
 from app.services.weather import ForecastResult
 
 KYIV = ZoneInfo("Europe/Kyiv")
 
 
 def a_forecast(score: int = 72, provider: str = "sunsethue", days_ahead: int = 0) -> ForecastResult:
-    sunset_at = datetime.now(KYIV).replace(hour=20, minute=14, second=0, microsecond=0)
-    sunset_at += timedelta(days=days_ahead)
+    event_at = datetime.now(KYIV).replace(hour=20, minute=14, second=0, microsecond=0)
+    event_at += timedelta(days=days_ahead)
     return ForecastResult(
         provider=provider,
-        forecast_date=sunset_at.date(),
-        sunset_at=sunset_at,
+        forecast_date=event_at.date(),
+        event_at=event_at,
         score=score,
         description="Варто вийти й перевірити: хмари мають добрий баланс для кольору.",
         weather_data={},
@@ -61,19 +61,19 @@ def test_tomorrow_is_labelled_as_tomorrow():
 
 
 def test_sunset_time_is_rendered_in_the_users_zone():
-    assert local_sunset_time(a_forecast(), "Europe/Kyiv") == "20:14"
+    assert local_event_time(a_forecast(), "Europe/Kyiv") == "20:14"
 
 
 def test_a_naive_sunset_is_read_as_local():
     result = ForecastResult(
         provider="open_meteo",
         forecast_date=datetime(2026, 8, 28).date(),
-        sunset_at=datetime(2026, 8, 28, 20, 14),
+        event_at=datetime(2026, 8, 28, 20, 14),
         score=50,
         description="x",
         weather_data={},
     )
-    assert local_sunset_time(result, "Europe/Kyiv") == "20:14"
+    assert local_event_time(result, "Europe/Kyiv") == "20:14"
 
 
 # The card.

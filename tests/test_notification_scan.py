@@ -100,7 +100,7 @@ def forecast(score: int) -> ForecastResult:
     return ForecastResult(
         provider="sunsethue",
         forecast_date=SUNSET.date(),
-        sunset_at=SUNSET,
+        event_at=SUNSET,
         score=score,
         description="",
         weather_data={},
@@ -169,7 +169,7 @@ async def test_a_provisional_score_below_threshold_leaves_the_day_open():
     provisional = ForecastResult(
         provider="open_meteo",
         forecast_date=SUNSET.date(),
-        sunset_at=SUNSET,
+        event_at=SUNSET,
         score=10,
         description="",
         weather_data={},

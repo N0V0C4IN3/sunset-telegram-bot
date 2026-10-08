@@ -64,7 +64,7 @@ async def notify_subscriber(
     a send that fails for one must not end the pass for the rest.
     """
     user_settings = user.settings
-    notify_at = forecast.sunset_at - timedelta(minutes=user_settings.lead_time_minutes)
+    notify_at = forecast.event_at - timedelta(minutes=user_settings.lead_time_minutes)
     scan_window_end = notify_at + timedelta(minutes=settings.notification_scan_interval_minutes)
     if not (notify_at <= local_now <= scan_window_end):
         return False

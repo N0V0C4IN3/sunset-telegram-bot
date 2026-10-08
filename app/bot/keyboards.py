@@ -11,11 +11,13 @@ def main_keyboard(
 
     `show_next_day` adds the Завтра button, and is only true while today's sunset
     is still ahead — after it, Сьогодні already serves tomorrow and there is no
-    second day inside the forecast window to offer.
+    second day inside the forecast window to offer. Світанок is always there: it
+    shows the next sunrise, whichever day that falls on.
     """
     days = [InlineKeyboardButton(text="🌅 Сьогодні", callback_data="today")]
     if show_next_day:
         days.append(InlineKeyboardButton(text="🌇 Завтра", callback_data="tomorrow"))
+    days.append(InlineKeyboardButton(text="🌄 Світанок", callback_data="sunrise"))
 
     rows = [days]
     if settings_open:

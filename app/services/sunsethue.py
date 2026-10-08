@@ -3,6 +3,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
+from app.services.solar import SolarEvent, days_to_ask
 from app.services.weather import ForecastResult, WeatherError
 
 PROVIDER_SUNSETHUE = "sunsethue"
@@ -70,6 +71,7 @@ class SunsethueClient:
         longitude: float,
         timezone: str,
         on_date: date | None = None,
+        event: SolarEvent = SolarEvent.SUNSET,
     ) -> ForecastResult:
         if not self.api_keys:
             raise SunsethueError("Sunsethue API key is not configured")
@@ -77,7 +79,7 @@ class SunsethueClient:
             raise SunsethueError("Sunsethue is cooling down after repeated failures")
 
         try:
-            result = await self._forecast_for_today(latitude, longitude, timezone, on_date)
+            result = await self._forecast_for_today(latitude, longitude, timezone, on_date, event)
         except SunsethueQuotaError:
             self._breaker.record_quota_exhaustion(datetime.now(UTC))
             raise
@@ -93,23 +95,25 @@ class SunsethueClient:
         longitude: float,
         timezone: str,
         on_date: date | None = None,
+        event: SolarEvent = SolarEvent.SUNSET,
     ) -> ForecastResult:
         tz = ZoneInfo(timezone)
         local_now = datetime.now(tz)
-        local_today = local_now.date()
 
         async with httpx.AsyncClient(timeout=15) as client:
             if on_date is not None:
-                payload = await self._fetch_event(client, latitude, longitude, on_date)
-                return self._parse_event(payload, timezone)
+                payload = await self._fetch_event(client, latitude, longitude, on_date, event)
+                return self._parse_event(payload, timezone, event)
 
-            for forecast_date in [local_today, local_today + timedelta(days=1)]:
-                payload = await self._fetch_event(client, latitude, longitude, forecast_date)
-                result = self._parse_event(payload, timezone)
-                if result.sunset_at.astimezone(tz) > local_now:
+            # Every event costs credits, so the day is chosen locally rather than
+            # by asking about today and discarding it once it turns out to be past.
+            for forecast_date in days_to_ask(event, local_now, latitude, longitude):
+                payload = await self._fetch_event(client, latitude, longitude, forecast_date, event)
+                result = self._parse_event(payload, timezone, event)
+                if result.event_at.astimezone(tz) > local_now:
                     return result
 
-        raise SunsethueError("Sunsethue response did not include an upcoming sunset")
+        raise SunsethueError(f"Sunsethue response did not include an upcoming {event}")
 
     async def _fetch_event(
         self,
@@ -117,12 +121,13 @@ class SunsethueClient:
         latitude: float,
         longitude: float,
         forecast_date: date,
+        event: SolarEvent,
     ) -> dict:
         params = {
             "latitude": latitude,
             "longitude": longitude,
             "date": forecast_date.isoformat(),
-            "type": "sunset",
+            "type": str(event),
             "forecast": "true",
         }
         quota_errors = 0
@@ -152,15 +157,15 @@ class SunsethueClient:
             raise SunsethueError(f"Sunsethue returned HTTP {response.status_code}{detail}")
         return payload
 
-    def _parse_event(self, payload: dict, timezone: str) -> ForecastResult:
+    def _parse_event(self, payload: dict, timezone: str, event: SolarEvent) -> ForecastResult:
         try:
             data = payload["data"]
-            if data["type"] != "sunset":
-                raise SunsethueError("Sunsethue response was not for sunset")
+            if data["type"] != event:
+                raise SunsethueError(f"Sunsethue response was not for {event}")
             if not data.get("model_data"):
                 raise SunsethueError("Sunsethue response did not include forecast model data")
             quality = float(data["quality"])
-            sunset_at = _parse_utc_datetime(data["time"])
+            event_at = _parse_utc_datetime(data["time"])
             score = round(max(0, min(1, quality)) * 100)
             quality_text = str(data.get("quality_text", "")).lower()
         except (KeyError, TypeError, ValueError) as exc:
@@ -180,11 +185,12 @@ class SunsethueClient:
         }
         return ForecastResult(
             provider=PROVIDER_SUNSETHUE,
-            forecast_date=sunset_at.astimezone(ZoneInfo(timezone)).date(),
-            sunset_at=sunset_at,
+            forecast_date=event_at.astimezone(ZoneInfo(timezone)).date(),
+            event_at=event_at,
             score=score,
-            description=_description_for_quality(quality_text, data, timezone),
+            description=_description_for_quality(quality_text, data, timezone, event),
             weather_data=weather_data,
+            event=event,
         )
 
 
@@ -215,15 +221,17 @@ def _is_quota_error(payload: dict) -> bool:
     return code == 204 or ("quota" in message and ("exceeded" in message or "daily" in message))
 
 
-def _description_for_quality(quality_text: str, data: dict, timezone: str) -> str:
+def _description_for_quality(quality_text: str, data: dict, timezone: str, event: SolarEvent) -> str:
+    # Nominative and genitive: "красивий захід", "умови для заходу".
+    noun, of_noun = ("схід", "сходу") if event is SolarEvent.SUNRISE else ("захід", "заходу")
     openers = {
-        "excellent": "Sunsethue дає дуже високий шанс на виразний захід",
-        "great": "Sunsethue дає високий шанс на красивий захід",
-        "good": "Sunsethue очікує добрі умови для заходу",
+        "excellent": f"Sunsethue дає дуже високий шанс на виразний {noun}",
+        "great": f"Sunsethue дає високий шанс на красивий {noun}",
+        "good": f"Sunsethue очікує добрі умови для {of_noun}",
         "fair": "Sunsethue бачить змішані, але не безнадійні умови",
         "poor": "Sunsethue очікує слабкі умови для кольору",
     }
-    opener = openers.get(quality_text, "Sunsethue оцінив захід сонця")
+    opener = openers.get(quality_text, f"Sunsethue оцінив {noun} сонця")
     details: list[str] = []
 
     cloud_cover = data.get("cloud_cover")
@@ -236,7 +244,7 @@ def _description_for_quality(quality_text: str, data: dict, timezone: str) -> st
     direction = data.get("direction")
     if direction is not None:
         try:
-            details.append(_direction_text(float(direction)))
+            details.append(_direction_text(float(direction), event))
         except (TypeError, ValueError):
             pass
 
@@ -264,7 +272,7 @@ def _cloud_cover_text(cloud_cover: float) -> str:
     return f"небо майже затягнуте ({percent}%), шанс на яскравий колір нижчий"
 
 
-def _direction_text(direction: float) -> str:
+def _direction_text(direction: float, event: SolarEvent) -> str:
     degrees = round(direction) % 360
     names = [
         "північ",
@@ -277,7 +285,8 @@ def _direction_text(direction: float) -> str:
         "північний захід",
     ]
     index = round(degrees / 45) % len(names)
-    return f"сонце сідає у напрямку {names[index]} ({degrees}°)"
+    verb = "сходить" if event is SolarEvent.SUNRISE else "сідає"
+    return f"сонце {verb} у напрямку {names[index]} ({degrees}°)"
 
 
 def _golden_hour_text(golden_hour: object, timezone: str) -> str | None:

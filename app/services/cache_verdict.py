@@ -11,6 +11,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from app.db.models import ForecastCache
+from app.services.solar import SolarEvent
 from app.services.sunsethue import PROVIDER_SUNSETHUE
 
 SUNSETHUE_MODEL_AVAILABLE_AT_UTC = (
@@ -52,18 +53,22 @@ def verdict_for(
     local_now: datetime,
     preferred_available: bool,
     on_date: date | None = None,
+    event: SolarEvent = SolarEvent.SUNSET,
 ) -> CacheVerdict:
     """Decide what to do with the rows held for a user.
 
     `candidates` are the stored forecasts that already passed the TTL, ordered
     soonest sunset first. `local_now` carries the user's timezone. `on_date`
-    narrows the question to one day; without it the next upcoming sunset wins.
+    narrows the question to one day; without it the next upcoming `event` wins.
+    A row for the other kind of Solar Event is never an answer, even on the same day.
     """
     timezone = local_now.tzinfo
     for cached in candidates:
+        if cached.event != event:
+            continue
         if on_date is not None and cached.forecast_date != on_date:
             continue
-        if not _sunset_is_upcoming(cached, timezone, local_now):
+        if not _event_is_upcoming(cached, timezone, local_now):
             continue
         if cached.provider == PROVIDER_SUNSETHUE:
             if _sunsethue_cache_is_current(cached, local_now):
@@ -82,8 +87,8 @@ def _as_local_time(value: datetime, timezone: ZoneInfo) -> datetime:
     return value.astimezone(timezone)
 
 
-def _sunset_is_upcoming(cache: ForecastCache, timezone: ZoneInfo, local_now: datetime) -> bool:
-    return _as_local_time(cache.sunset_at, timezone) > local_now
+def _event_is_upcoming(cache: ForecastCache, timezone: ZoneInfo, local_now: datetime) -> bool:
+    return _as_local_time(cache.event_at, timezone) > local_now
 
 
 def _sunsethue_cache_is_current(cache: ForecastCache, local_now: datetime) -> bool:
