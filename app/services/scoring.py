@@ -1,5 +1,7 @@
 from dataclasses import dataclass
 
+from app.services.solar import WORDS, SolarEvent
+
 
 @dataclass(frozen=True)
 class SunsetScore:
@@ -7,7 +9,12 @@ class SunsetScore:
     description: str
 
 
-def score_sunset(weather: dict) -> SunsetScore:
+def score_sunset(weather: dict, event: SolarEvent = SolarEvent.SUNSET) -> SunsetScore:
+    """Score the weather around a Solar Event. `event` only changes the wording.
+
+    It defaults to sunset because the autoresearch harness scores its harvested
+    sunset corpus through this exact call shape.
+    """
     cloud = _value(weather, "cloud_cover", 50)
     low = _value(weather, "cloud_cover_low", cloud)
     low_max = _value(weather, "cloud_cover_low_max", low)
@@ -61,6 +68,7 @@ def score_sunset(weather: dict) -> SunsetScore:
         clarity_score=clarity_score,
         consistency_score=consistency_score,
         weather=weather,
+        event=event,
     )
     return SunsetScore(score=round(score), description=description)
 
@@ -148,13 +156,15 @@ def _build_description(
     clarity_score: float,
     consistency_score: float,
     weather: dict,
+    event: SolarEvent,
 ) -> str:
+    words = WORDS[event]
     if score >= 80:
         opener = "Виглядає дуже перспективно"
     elif score >= 65:
         opener = "Варто вийти й перевірити"
     elif score >= 45:
-        opener = "Є шанс на непоганий захід"
+        opener = f"Є шанс на непоганий {words.noun}"
     else:
         opener = "Схоже, сьогодні без великої драми на небі"
 
@@ -182,9 +192,9 @@ def _build_description(
         cautions.append("серпанок, вологість або забруднення можуть приглушити кольори")
 
     if consistency_score >= 75:
-        reasons.append("прогноз у вікні заходу досить стабільний")
+        reasons.append(f"прогноз у вікні {words.of_noun} досить стабільний")
     elif consistency_score < 45:
-        cautions.append("прогноз швидко змінюється біля заходу")
+        cautions.append(f"прогноз швидко змінюється біля {words.of_noun}")
 
     air_quality = weather.get("air_quality") or {}
     if any(_optional_value(air_quality, field) is not None for field in ["pm10", "pm2_5", "aerosol_optical_depth", "dust"]):

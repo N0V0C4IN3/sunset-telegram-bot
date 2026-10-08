@@ -1,13 +1,20 @@
 import asyncio
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 import httpx
 
 from app.services.scoring import SunsetScore, score_sunset
+from app.services.solar import SolarEvent
 
 PROVIDER_OPEN_METEO = "open_meteo"
+
+# The scoring window is written for sunset: 2h before to 1h after. Measuring
+# time towards the event instead of away from it mirrors that for sunrise. The
+# mirror is a starting point; the weights were only ever fitted on sunsets.
+WINDOW_HOURS_BEFORE, WINDOW_HOURS_AFTER = 2, 1
+TIME_DIRECTION = {SolarEvent.SUNSET: 1, SolarEvent.SUNRISE: -1}
 
 
 class WeatherError(RuntimeError):
@@ -17,8 +24,9 @@ class WeatherError(RuntimeError):
 @dataclass(frozen=True)
 class ForecastResult:
     provider: str
+    event: SolarEvent
     forecast_date: date
-    sunset_at: datetime
+    event_at: datetime
     score: int
     description: str
     weather_data: dict
@@ -33,11 +41,13 @@ class OpenMeteoClient:
         latitude: float,
         longitude: float,
         timezone: str,
+        event: SolarEvent,
         on_date: date | None = None,
     ) -> ForecastResult:
-        """The next upcoming sunset, or the one on `on_date` when asked for a day.
+        """The next upcoming `event`, or the one on `on_date` when asked for a day.
 
-        The 2-day payload already covers both, so naming a day costs no extra call.
+        The 2-day payload already covers both days and both events, so naming a
+        day or a sunrise costs no extra call.
         """
         tz = ZoneInfo(timezone)
         now = datetime.now(tz)
@@ -48,20 +58,23 @@ class OpenMeteoClient:
 
         try:
             daily = weather_payload["daily"]
-            sunset_at = self._relevant_sunset(daily["sunset"], now, tz, on_date)
+            event_at = self._relevant_event(daily[event], now, tz, on_date)
             hourly = weather_payload["hourly"]
         except (KeyError, IndexError, TypeError, ValueError) as exc:
             raise WeatherError("Open-Meteo response did not include expected fields") from exc
 
-        weather_window = self._weather_near_sunset(hourly, sunset_at)
+        weather_window = self._weather_near_event(hourly, event_at, event)
         if air_quality_payload:
-            weather_window["air_quality"] = self._air_quality_near_sunset(air_quality_payload.get("hourly", {}), sunset_at)
+            weather_window["air_quality"] = self._air_quality_near_event(
+                air_quality_payload.get("hourly", {}), event_at, event
+            )
 
-        scored: SunsetScore = score_sunset(weather_window)
+        scored: SunsetScore = score_sunset(weather_window, event)
         return ForecastResult(
             provider=PROVIDER_OPEN_METEO,
-            forecast_date=sunset_at.date(),
-            sunset_at=sunset_at,
+            event=event,
+            forecast_date=event_at.date(),
+            event_at=event_at,
             score=scored.score,
             description=scored.description,
             weather_data=weather_window,
@@ -73,7 +86,7 @@ class OpenMeteoClient:
             "longitude": longitude,
             "timezone": timezone,
             "forecast_days": 2,
-            "daily": "sunset",
+            "daily": "sunrise,sunset",
             "hourly": ",".join(
                 [
                     "cloud_cover",
@@ -117,31 +130,31 @@ class OpenMeteoClient:
         except httpx.HTTPError:
             return {}
 
-    def _relevant_sunset(
+    def _relevant_event(
         self,
-        sunsets: list[str],
+        times: list[str],
         now: datetime,
         timezone: ZoneInfo,
         on_date: date | None = None,
     ) -> datetime:
         candidates = [
-            datetime.fromisoformat(sunset).replace(tzinfo=timezone)
-            for sunset in sunsets
+            datetime.fromisoformat(value).replace(tzinfo=timezone)
+            for value in times
         ]
         if on_date is not None:
-            for sunset_at in candidates:
-                if sunset_at.date() == on_date:
-                    return sunset_at
+            for event_at in candidates:
+                if event_at.date() == on_date:
+                    return event_at
             raise WeatherError("Open-Meteo response did not include the requested day")
-        for sunset_at in candidates:
-            if sunset_at > now:
-                return sunset_at
+        for event_at in candidates:
+            if event_at > now:
+                return event_at
         if candidates:
             return candidates[-1]
-        raise WeatherError("Open-Meteo response did not include sunset times")
+        raise WeatherError("Open-Meteo response did not include event times")
 
-    def _weather_near_sunset(self, hourly: dict, sunset_at: datetime) -> dict:
-        samples = self._samples_near_sunset(hourly, sunset_at, hours_before=2, hours_after=1)
+    def _weather_near_event(self, hourly: dict, event_at: datetime, event: SolarEvent) -> dict:
+        samples = self._samples_near_event(hourly, event_at, event)
         fields = [
             "cloud_cover",
             "cloud_cover_low",
@@ -156,6 +169,8 @@ class OpenMeteoClient:
         weather["cloud_cover_low_max"] = self._max_value(hourly, "cloud_cover_low", samples)
         weather["cloud_cover_max"] = self._max_value(hourly, "cloud_cover", samples)
         weather["precipitation_probability_max"] = self._max_value(hourly, "precipitation_probability", samples)
+        # The keys keep their sunset names: they are the scoring input, and the
+        # harvested autoresearch corpus is keyed on them.
         weather["sunset_window_consistency"] = self._consistency_score(hourly, samples)
         weather["sunset_window_hours"] = [
             {
@@ -166,37 +181,30 @@ class OpenMeteoClient:
         ]
         return weather
 
-    def _air_quality_near_sunset(self, hourly: dict, sunset_at: datetime) -> dict:
+    def _air_quality_near_event(self, hourly: dict, event_at: datetime, event: SolarEvent) -> dict:
         if not hourly:
             return {}
         try:
-            samples = self._samples_near_sunset(hourly, sunset_at, hours_before=2, hours_after=1)
+            samples = self._samples_near_event(hourly, event_at, event)
         except WeatherError:
             return {}
         fields = ["pm10", "pm2_5", "aerosol_optical_depth", "dust", "european_aqi", "us_aqi"]
         return {field: self._weighted_average(hourly, field, samples) for field in fields}
 
-    def _samples_near_sunset(
-        self,
-        hourly: dict,
-        sunset_at: datetime,
-        hours_before: int,
-        hours_after: int,
-    ) -> list[dict]:
+    def _samples_near_event(self, hourly: dict, event_at: datetime, event: SolarEvent) -> list[dict]:
+        """Hourly samples inside the event's window, weighted by `_event_weight`."""
         times = hourly.get("time", [])
         if not times:
             raise WeatherError("Open-Meteo response did not include hourly times")
 
-        parsed_times = [datetime.fromisoformat(value).replace(tzinfo=sunset_at.tzinfo) for value in times]
-        start = sunset_at - timedelta(hours=hours_before)
-        end = sunset_at + timedelta(hours=hours_after)
+        parsed_times = [datetime.fromisoformat(value).replace(tzinfo=event_at.tzinfo) for value in times]
         samples = [
-            {"index": index, "time": value, "weight": self._sunset_weight(value, sunset_at)}
+            {"index": index, "time": value, "weight": self._event_weight(value, event_at, event)}
             for index, value in enumerate(parsed_times)
-            if start <= value <= end
+            if -WINDOW_HOURS_BEFORE <= _hours_from_event(value, event_at, event) <= WINDOW_HOURS_AFTER
         ]
         if not samples:
-            nearest_index = min(range(len(parsed_times)), key=lambda index: abs(parsed_times[index] - sunset_at))
+            nearest_index = min(range(len(parsed_times)), key=lambda index: abs(parsed_times[index] - event_at))
             samples = [
                 {
                     "index": nearest_index,
@@ -208,8 +216,8 @@ class OpenMeteoClient:
         total_weight = sum(sample["weight"] for sample in samples)
         return [{**sample, "weight": sample["weight"] / total_weight} for sample in samples]
 
-    def _sunset_weight(self, sample_time: datetime, sunset_at: datetime) -> float:
-        delta_hours = (sample_time - sunset_at).total_seconds() / 3600
+    def _event_weight(self, sample_time: datetime, event_at: datetime, event: SolarEvent) -> float:
+        delta_hours = _hours_from_event(sample_time, event_at, event)
         if -1 <= delta_hours <= 0.25:
             return 1.0
         if -2 <= delta_hours < -1:
@@ -254,3 +262,8 @@ class OpenMeteoClient:
             return 65
         average_spread = sum(spreads) / len(spreads)
         return max(0, min(100, 100 - average_spread * 1.4))
+
+
+def _hours_from_event(sample_time: datetime, event_at: datetime, event: SolarEvent) -> float:
+    """Signed hours from the event, negative on the side the window leans towards."""
+    return (sample_time - event_at).total_seconds() / 3600 * TIME_DIRECTION[event]

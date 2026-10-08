@@ -11,13 +11,18 @@ def main_keyboard(
 
     `show_next_day` adds the Завтра button, and is only true while today's sunset
     is still ahead — after it, Сьогодні already serves tomorrow and there is no
-    second day inside the forecast window to offer.
+    second day inside the forecast window to offer. Світанок is always there: it
+    shows the next sunrise, whichever day that falls on.
+
+    No row holds more than two buttons, and the longer labels get a row to
+    themselves: Telegram splits a row's width evenly and cuts each label off with
+    an ellipsis on a phone rather than wrapping it.
     """
     days = [InlineKeyboardButton(text="🌅 Сьогодні", callback_data="today")]
     if show_next_day:
         days.append(InlineKeyboardButton(text="🌇 Завтра", callback_data="tomorrow"))
 
-    rows = [days]
+    rows = [days, [InlineKeyboardButton(text="🌄 Світанок", callback_data="sunrise")]]
     if settings_open:
         rows.append(
             [
@@ -26,6 +31,8 @@ def main_keyboard(
             ]
         )
         rows.append([InlineKeyboardButton(text="📍 Змінити локацію", callback_data="change_location")])
+        # Reference material, not something to reach for from every card.
+        rows.append([InlineKeyboardButton(text="ℹ️ Як рахується бал", callback_data="score_info")])
     rows.append(
         [
             InlineKeyboardButton(
@@ -34,12 +41,7 @@ def main_keyboard(
             )
         ]
     )
-    rows.append(
-        [
-            InlineKeyboardButton(text="⚙️ Налаштування", callback_data="settings"),
-            InlineKeyboardButton(text="ℹ️ Як рахується бал", callback_data="score_info"),
-        ]
-    )
+    rows.append([InlineKeyboardButton(text="⚙️ Налаштування", callback_data="settings")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
