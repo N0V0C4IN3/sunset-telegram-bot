@@ -12,10 +12,14 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from app.services.scheduler import notify_subscriber, run_notification_scan
+from app.services.solar import SolarEvent
 from app.services.weather import ForecastResult
 
 TZ = "Europe/Kyiv"
 SUNSET = datetime(2026, 8, 31, 20, 0, tzinfo=ZoneInfo(TZ))
+# Kyiv's real sunset that day is about 19:40, so the notification window sits
+# before it and Завтра is still on offer.
+KYIV_LOCATION = (50.45, 30.52)
 
 
 @dataclass
@@ -58,6 +62,9 @@ class FakeRepo:
     async def delete_old_forecasts(self, retention_days):
         return 0
 
+    def decrypt_location(self, user):
+        return KYIV_LOCATION
+
 
 class FakeSession:
     """Commits and rolls back the repo's pending marks, like the real unit of work."""
@@ -87,18 +94,21 @@ class FakeBot:
     def __init__(self, blocked_by: set[int] | None = None):
         self.blocked_by = blocked_by or set()
         self.sent_to: list[int] = []
+        self.markups: dict[int, object] = {}
 
-    async def send_photo(self, chat_id, photo, caption=None):
+    async def send_photo(self, chat_id, photo, caption=None, reply_markup=None):
         if chat_id in self.blocked_by:
             raise RuntimeError("Forbidden: bot was blocked by the user")
         self.sent_to.append(chat_id)
+        self.markups[chat_id] = reply_markup
 
 
 def forecast(score: int) -> ForecastResult:
     return ForecastResult(
         provider="sunsethue",
+        event=SolarEvent.SUNSET,
         forecast_date=SUNSET.date(),
-        sunset_at=SUNSET,
+        event_at=SUNSET,
         score=score,
         description="",
         weather_data={},
@@ -121,6 +131,22 @@ async def test_a_good_forecast_inside_the_window_is_sent_and_consumes_the_day():
     assert sent is True
     assert bot.sent_to == [1]
     assert repo.uncommitted == [(1, SUNSET.date())]
+
+
+def callbacks(markup) -> list[str]:
+    return [button.callback_data for row in markup.inline_keyboard for button in row]
+
+
+@pytest.mark.asyncio
+async def test_a_notification_carries_the_forecast_keyboard():
+    """Сьогодні and Завтра work from the notification as they do from /today."""
+    user, repo, bot = FakeUser(1), FakeRepo([]), FakeBot()
+    await notify_subscriber(
+        bot, repo, user, FakeSettings(), FakeSunsethue(), forecast(90), inside_window(user)
+    )
+    buttons = callbacks(bot.markups[1])
+    assert buttons[:2] == ["today", "tomorrow"]
+    assert "unsubscribe" in buttons, "a notification only reaches a subscriber"
 
 
 @pytest.mark.asyncio
@@ -150,8 +176,9 @@ async def test_a_provisional_score_below_threshold_leaves_the_day_open():
     user, repo, bot = FakeUser(1), FakeRepo([]), FakeBot()
     provisional = ForecastResult(
         provider="open_meteo",
+        event=SolarEvent.SUNSET,
         forecast_date=SUNSET.date(),
-        sunset_at=SUNSET,
+        event_at=SUNSET,
         score=10,
         description="",
         weather_data={},
@@ -179,7 +206,7 @@ def scan(monkeypatch):
             def __init__(self, *args, **kwargs):
                 pass
 
-            async def today_for_user(self, user, on_date=None):
+            async def today_for_user(self, user, event, on_date=None):
                 return forecast((scores or {}).get(user.id, 90))
 
         monkeypatch.setattr("app.services.scheduler.Repository", lambda _session: repo)
