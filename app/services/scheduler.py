@@ -14,7 +14,8 @@ from app.config import Settings
 from app.db.models import User
 from app.health import record_scan
 from app.db.repository import Repository
-from app.services.forecast_service import ForecastService, is_provisional
+from app.services.forecast_service import ForecastService, is_provisional, next_day_available
+from app.services.solar import SolarEvent
 from app.services.sunsethue import SunsethueClient
 from app.services.weather import ForecastResult, OpenMeteoClient, WeatherError
 
@@ -64,7 +65,7 @@ async def notify_subscriber(
     a send that fails for one must not end the pass for the rest.
     """
     user_settings = user.settings
-    notify_at = forecast.sunset_at - timedelta(minutes=user_settings.lead_time_minutes)
+    notify_at = forecast.event_at - timedelta(minutes=user_settings.lead_time_minutes)
     scan_window_end = notify_at + timedelta(minutes=settings.notification_scan_interval_minutes)
     if not (notify_at <= local_now <= scan_window_end):
         return False
@@ -79,11 +80,11 @@ async def notify_subscriber(
 
     caption = format_forecast(forecast, user.timezone, provisional=provisional)
     png = await render_forecast_card(forecast, user.timezone)
-    # The same keyboard /today shows, so Сьогодні/Завтра edit the notification
-    # in place. Завтра follows the same rule: only while today's sunset is ahead.
+    # The same keyboard /today shows, so its buttons edit the notification in
+    # place, and Завтра follows the same rule as everywhere else.
     keyboard = main_keyboard(
         user_settings.subscribed,
-        show_next_day=forecast.forecast_date == local_now.date(),
+        show_next_day=next_day_available(repo.decrypt_location(user), local_now),
     )
     await bot.send_photo(
         user.id,
@@ -117,7 +118,7 @@ async def run_notification_scan(
                     weather_client,
                     sunsethue_client,
                     repository=repo,
-                ).today_for_user(user)
+                ).today_for_user(user, SolarEvent.SUNSET)
             except WeatherError:
                 logger.warning("forecast_unavailable_during_notification")
                 continue
