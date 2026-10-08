@@ -31,6 +31,8 @@ def main_keyboard(
             ]
         )
         rows.append([InlineKeyboardButton(text="📍 Змінити локацію", callback_data="change_location")])
+        # Reference material, not something to reach for from every card.
+        rows.append([InlineKeyboardButton(text="ℹ️ Як рахується бал", callback_data="score_info")])
     rows.append(
         [
             InlineKeyboardButton(
@@ -40,7 +42,6 @@ def main_keyboard(
         ]
     )
     rows.append([InlineKeyboardButton(text="⚙️ Налаштування", callback_data="settings")])
-    rows.append([InlineKeyboardButton(text="ℹ️ Як рахується бал", callback_data="score_info")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

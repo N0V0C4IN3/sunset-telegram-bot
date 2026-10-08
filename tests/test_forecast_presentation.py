@@ -129,7 +129,7 @@ def test_the_settings_view_is_the_same_keyboard_with_the_tuning_row():
     plain = callback_data(main_keyboard(True))
     opened = callback_data(settings_keyboard(True))
     assert plain < opened
-    assert {"set_threshold", "set_lead_time", "change_location"} == opened - plain
+    assert {"set_threshold", "set_lead_time", "change_location", "score_info"} == opened - plain
 
 
 def test_both_views_offer_the_subscription_toggle_in_one_direction_only():
@@ -154,5 +154,8 @@ def test_the_longer_labels_have_a_row_to_themselves():
     assert rows[0] == ["today", "tomorrow"]
     assert ["sunrise"] in rows
     assert ["settings"] in rows
-    assert ["score_info"] in rows
-    assert rows.index(["score_info"]) == rows.index(["settings"]) + 1
+
+
+def test_the_score_explanation_lives_in_settings_only():
+    assert "score_info" not in callback_data(main_keyboard(True, show_next_day=True))
+    assert "score_info" in callback_data(settings_keyboard(True))

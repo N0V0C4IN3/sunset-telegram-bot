@@ -332,7 +332,8 @@ async def score_info_callback(callback: CallbackQuery) -> None:
         callback.message.chat.id,
         callback.message.message_id,
         score_info_text(),
-        main_keyboard(subscribed),
+        # Reached from the settings view, so it keeps that keyboard to go back to.
+        settings_keyboard(subscribed),
         replace=from_photo(callback),
     )
 
@@ -512,16 +513,15 @@ async def show_settings(
         threshold = user.settings.threshold
         lead_time = user.settings.lead_time_minutes
         subscribed = user.settings.subscribed
-        # Decrypted for display only; it is never logged.
-        location = repo.decrypt_location(user)
-        timezone = user.timezone
+        has_location = user.latitude_encrypted is not None and user.longitude_encrypted is not None
+        timezone = user.timezone if has_location else None
         await session.commit()
 
     await send_or_edit(
         bot,
         chat_id,
         message_id,
-        settings_text(threshold, lead_time, subscribed, location, timezone),
+        settings_text(threshold, lead_time, subscribed, timezone),
         settings_keyboard(subscribed),
         replace=replace,
     )
