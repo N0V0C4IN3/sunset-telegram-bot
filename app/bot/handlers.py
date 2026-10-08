@@ -22,6 +22,7 @@ from app.bot.card import render_forecast_card
 from app.bot.keyboards import cancel_keyboard, location_keyboard, main_keyboard, settings_keyboard
 from app.bot.messages import format_forecast, location_saved_text, score_info_text, settings_text
 from app.config import Settings
+from app.db.models import User
 from app.db.repository import Repository
 from app.services.forecast_service import ForecastService, is_provisional, next_day_available
 from app.services.solar import SolarEvent
@@ -223,6 +224,7 @@ async def start(message: Message) -> None:
         )
         has_location = user.latitude_encrypted is not None and user.longitude_encrypted is not None
         subscribed = user.settings.subscribed
+        show_next_day = offers_next_day(repo, user)
         await session.commit()
 
     await message.answer(
@@ -231,7 +233,10 @@ async def start(message: Message) -> None:
         reply_markup=location_keyboard(),
     )
     if has_location:
-        await message.answer("Можна вже перевірити прогноз на сьогодні.", reply_markup=main_keyboard(subscribed))
+        await message.answer(
+            "Можна вже перевірити прогноз на сьогодні.",
+            reply_markup=main_keyboard(subscribed, show_next_day=show_next_day),
+        )
 
 
 @router.message(Command("location"))
@@ -258,13 +263,14 @@ async def save_location(message: Message) -> None:
         await repo.save_location(message.from_user.id, latitude, longitude, timezone)
         user = await repo.get_user_with_settings(message.from_user.id)
         subscribed = user.settings.subscribed
+        show_next_day = offers_next_day(repo, user)
         await session.commit()
 
     await message.answer(
         location_saved_text(replaced=replaced),
         reply_markup=ReplyKeyboardRemove(),
     )
-    await message.answer("Що робимо далі?", reply_markup=main_keyboard(subscribed))
+    await message.answer("Що робимо далі?", reply_markup=main_keyboard(subscribed, show_next_day=show_next_day))
 
 
 @router.message(Command("today"))
@@ -326,14 +332,14 @@ async def unsubscribe_callback(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "score_info")
 async def score_info_callback(callback: CallbackQuery) -> None:
     await answer_callback(callback)
-    subscribed = await user_is_subscribed(callback.from_user.id)
+    subscribed, show_next_day = await keyboard_state(callback.from_user.id)
     await send_or_edit(
         callback.bot,
         callback.message.chat.id,
         callback.message.message_id,
         score_info_text(),
         # Reached from the settings view, so it keeps that keyboard to go back to.
-        settings_keyboard(subscribed),
+        settings_keyboard(subscribed, show_next_day=show_next_day),
         replace=from_photo(callback),
     )
 
@@ -374,13 +380,14 @@ async def cancel_input(callback: CallbackQuery) -> None:
         await repo.set_pending_input(callback.from_user.id, None)
         user = await repo.get_user_with_settings(callback.from_user.id)
         subscribed = bool(user and user.settings and user.settings.subscribed)
+        show_next_day = user is not None and offers_next_day(repo, user)
         await session.commit()
     await send_or_edit(
         callback.bot,
         callback.message.chat.id,
         callback.message.message_id,
         "Скасовано.",
-        main_keyboard(subscribed),
+        main_keyboard(subscribed, show_next_day=show_next_day),
         replace=from_photo(callback),
     )
 
@@ -454,7 +461,7 @@ async def send_card(
             )
             return
 
-        show_next_day = next_day_available(repo.decrypt_location(user), local_now)
+        show_next_day = offers_next_day(repo, user)
 
     caption = format_forecast(result, timezone, provisional=is_provisional(result, sunsethue_client()))
     png = await render_forecast_card(result, timezone)
@@ -485,6 +492,7 @@ async def set_subscription(
             settings.default_notification_lead_time_minutes,
         )
         has_location = user.latitude_encrypted is not None and user.longitude_encrypted is not None
+        show_next_day = offers_next_day(repo, user)
         await repo.set_subscribed(user_id, subscribed)
         await session.commit()
 
@@ -496,7 +504,8 @@ async def set_subscription(
         )
     else:
         text = "Сповіщення увімкнено." if subscribed else "Сповіщення вимкнено."
-        await send_or_edit(bot, chat_id, message_id, text, main_keyboard(subscribed), replace=replace)
+        keyboard = main_keyboard(subscribed, show_next_day=show_next_day)
+        await send_or_edit(bot, chat_id, message_id, text, keyboard, replace=replace)
 
 
 async def show_settings(
@@ -515,6 +524,7 @@ async def show_settings(
         subscribed = user.settings.subscribed
         has_location = user.latitude_encrypted is not None and user.longitude_encrypted is not None
         timezone = user.timezone if has_location else None
+        show_next_day = offers_next_day(repo, user)
         await session.commit()
 
     await send_or_edit(
@@ -522,7 +532,7 @@ async def show_settings(
         chat_id,
         message_id,
         settings_text(threshold, lead_time, subscribed, timezone),
-        settings_keyboard(subscribed),
+        settings_keyboard(subscribed, show_next_day=show_next_day),
         replace=replace,
     )
 
@@ -542,8 +552,23 @@ async def set_pending(
     await send_or_edit(bot, chat_id, message_id, text, cancel_keyboard(), replace=replace)
 
 
-async def user_is_subscribed(user_id: int) -> bool:
+def offers_next_day(repo: Repository, user: User) -> bool:
+    """Whether this user's keyboard gets Завтра, wherever the keyboard appears.
+
+    Every view carries the day buttons, so every view applies the same rule as
+    the card; without a saved location there is no sunset to be ahead of.
+    """
+    location = repo.decrypt_location(user)
+    if location is None:
+        return False
+    return next_day_available(location, datetime.now(ZoneInfo(user.timezone)))
+
+
+async def keyboard_state(user_id: int) -> tuple[bool, bool]:
+    """(subscribed, show_next_day) for a view that only needs the keyboard."""
     async with open_session() as session:
         repo = Repository(session)
         user = await repo.get_user_with_settings(user_id)
-        return bool(user and user.settings and user.settings.subscribed)
+        if user is None or user.settings is None:
+            return False, False
+        return user.settings.subscribed, offers_next_day(repo, user)
