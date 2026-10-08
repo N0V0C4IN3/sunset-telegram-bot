@@ -1,6 +1,6 @@
 import asyncio
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -10,6 +10,12 @@ from app.services.solar import SolarEvent
 
 PROVIDER_OPEN_METEO = "open_meteo"
 
+# The scoring window is written for sunset: 2h before to 1h after. Measuring
+# time towards the event instead of away from it mirrors that for sunrise. The
+# mirror is a starting point; the weights were only ever fitted on sunsets.
+WINDOW_HOURS_BEFORE, WINDOW_HOURS_AFTER = 2, 1
+TIME_DIRECTION = {SolarEvent.SUNSET: 1, SolarEvent.SUNRISE: -1}
+
 
 class WeatherError(RuntimeError):
     pass
@@ -18,12 +24,12 @@ class WeatherError(RuntimeError):
 @dataclass(frozen=True)
 class ForecastResult:
     provider: str
+    event: SolarEvent
     forecast_date: date
     event_at: datetime
     score: int
     description: str
     weather_data: dict
-    event: SolarEvent = SolarEvent.SUNSET
 
 
 class OpenMeteoClient:
@@ -35,8 +41,8 @@ class OpenMeteoClient:
         latitude: float,
         longitude: float,
         timezone: str,
+        event: SolarEvent,
         on_date: date | None = None,
-        event: SolarEvent = SolarEvent.SUNSET,
     ) -> ForecastResult:
         """The next upcoming `event`, or the one on `on_date` when asked for a day.
 
@@ -66,12 +72,12 @@ class OpenMeteoClient:
         scored: SunsetScore = score_sunset(weather_window, event)
         return ForecastResult(
             provider=PROVIDER_OPEN_METEO,
+            event=event,
             forecast_date=event_at.date(),
             event_at=event_at,
             score=scored.score,
             description=scored.description,
             weather_data=weather_window,
-            event=event,
         )
 
     async def _fetch_weather(self, client: httpx.AsyncClient, latitude: float, longitude: float, timezone: str) -> dict:
@@ -186,24 +192,16 @@ class OpenMeteoClient:
         return {field: self._weighted_average(hourly, field, samples) for field in fields}
 
     def _samples_near_event(self, hourly: dict, event_at: datetime, event: SolarEvent) -> list[dict]:
-        """Hourly samples around the event, weighted by `_event_weight`.
-
-        The sunset window runs from 2h before to 1h after. A sunrise mirrors it in
-        time: 1h before to 2h after. The mirror is a starting point, not a tuned
-        result — the weights were fitted on sunsets only.
-        """
-        hours_before, hours_after = (1, 2) if event is SolarEvent.SUNRISE else (2, 1)
+        """Hourly samples inside the event's window, weighted by `_event_weight`."""
         times = hourly.get("time", [])
         if not times:
             raise WeatherError("Open-Meteo response did not include hourly times")
 
         parsed_times = [datetime.fromisoformat(value).replace(tzinfo=event_at.tzinfo) for value in times]
-        start = event_at - timedelta(hours=hours_before)
-        end = event_at + timedelta(hours=hours_after)
         samples = [
             {"index": index, "time": value, "weight": self._event_weight(value, event_at, event)}
             for index, value in enumerate(parsed_times)
-            if start <= value <= end
+            if -WINDOW_HOURS_BEFORE <= _hours_from_event(value, event_at, event) <= WINDOW_HOURS_AFTER
         ]
         if not samples:
             nearest_index = min(range(len(parsed_times)), key=lambda index: abs(parsed_times[index] - event_at))
@@ -219,9 +217,7 @@ class OpenMeteoClient:
         return [{**sample, "weight": sample["weight"] / total_weight} for sample in samples]
 
     def _event_weight(self, sample_time: datetime, event_at: datetime, event: SolarEvent) -> float:
-        delta_hours = (sample_time - event_at).total_seconds() / 3600
-        if event is SolarEvent.SUNRISE:
-            delta_hours = -delta_hours
+        delta_hours = _hours_from_event(sample_time, event_at, event)
         if -1 <= delta_hours <= 0.25:
             return 1.0
         if -2 <= delta_hours < -1:
@@ -266,3 +262,8 @@ class OpenMeteoClient:
             return 65
         average_spread = sum(spreads) / len(spreads)
         return max(0, min(100, 100 - average_spread * 1.4))
+
+
+def _hours_from_event(sample_time: datetime, event_at: datetime, event: SolarEvent) -> float:
+    """Signed hours from the event, negative on the side the window leans towards."""
+    return (sample_time - event_at).total_seconds() / 3600 * TIME_DIRECTION[event]

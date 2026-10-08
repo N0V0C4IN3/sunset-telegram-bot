@@ -3,7 +3,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from app.services.solar import SolarEvent, days_to_ask
+from app.services.solar import WORDS, SolarEvent, days_to_ask
 from app.services.weather import ForecastResult, WeatherError
 
 PROVIDER_SUNSETHUE = "sunsethue"
@@ -70,8 +70,8 @@ class SunsethueClient:
         latitude: float,
         longitude: float,
         timezone: str,
+        event: SolarEvent,
         on_date: date | None = None,
-        event: SolarEvent = SolarEvent.SUNSET,
     ) -> ForecastResult:
         if not self.api_keys:
             raise SunsethueError("Sunsethue API key is not configured")
@@ -79,7 +79,7 @@ class SunsethueClient:
             raise SunsethueError("Sunsethue is cooling down after repeated failures")
 
         try:
-            result = await self._forecast_for_today(latitude, longitude, timezone, on_date, event)
+            result = await self._forecast_for_today(latitude, longitude, timezone, event, on_date)
         except SunsethueQuotaError:
             self._breaker.record_quota_exhaustion(datetime.now(UTC))
             raise
@@ -94,8 +94,8 @@ class SunsethueClient:
         latitude: float,
         longitude: float,
         timezone: str,
+        event: SolarEvent,
         on_date: date | None = None,
-        event: SolarEvent = SolarEvent.SUNSET,
     ) -> ForecastResult:
         tz = ZoneInfo(timezone)
         local_now = datetime.now(tz)
@@ -107,7 +107,13 @@ class SunsethueClient:
 
             # Every event costs credits, so the day is chosen locally rather than
             # by asking about today and discarding it once it turns out to be past.
-            for forecast_date in days_to_ask(event, local_now, latitude, longitude):
+            # Tomorrow stays behind it as a fallback: if Sunsethue places today's
+            # event earlier than the equation does, the answer comes back already
+            # past, and that is a disagreement to absorb, not a provider failure.
+            days = days_to_ask(event, local_now, latitude, longitude)
+            if days[-1] == local_now.date():
+                days.append(local_now.date() + timedelta(days=1))
+            for forecast_date in days:
                 payload = await self._fetch_event(client, latitude, longitude, forecast_date, event)
                 result = self._parse_event(payload, timezone, event)
                 if result.event_at.astimezone(tz) > local_now:
@@ -222,16 +228,15 @@ def _is_quota_error(payload: dict) -> bool:
 
 
 def _description_for_quality(quality_text: str, data: dict, timezone: str, event: SolarEvent) -> str:
-    # Nominative and genitive: "красивий захід", "умови для заходу".
-    noun, of_noun = ("схід", "сходу") if event is SolarEvent.SUNRISE else ("захід", "заходу")
+    words = WORDS[event]
     openers = {
-        "excellent": f"Sunsethue дає дуже високий шанс на виразний {noun}",
-        "great": f"Sunsethue дає високий шанс на красивий {noun}",
-        "good": f"Sunsethue очікує добрі умови для {of_noun}",
+        "excellent": f"Sunsethue дає дуже високий шанс на виразний {words.noun}",
+        "great": f"Sunsethue дає високий шанс на красивий {words.noun}",
+        "good": f"Sunsethue очікує добрі умови для {words.of_noun}",
         "fair": "Sunsethue бачить змішані, але не безнадійні умови",
         "poor": "Sunsethue очікує слабкі умови для кольору",
     }
-    opener = openers.get(quality_text, f"Sunsethue оцінив {noun} сонця")
+    opener = openers.get(quality_text, f"Sunsethue оцінив {words.noun} сонця")
     details: list[str] = []
 
     cloud_cover = data.get("cloud_cover")
@@ -285,8 +290,7 @@ def _direction_text(direction: float, event: SolarEvent) -> str:
         "північний захід",
     ]
     index = round(degrees / 45) % len(names)
-    verb = "сходить" if event is SolarEvent.SUNRISE else "сідає"
-    return f"сонце {verb} у напрямку {names[index]} ({degrees}°)"
+    return f"сонце {WORDS[event].verb} у напрямку {names[index]} ({degrees}°)"
 
 
 def _golden_hour_text(golden_hour: object, timezone: str) -> str | None:

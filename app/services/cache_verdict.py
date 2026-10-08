@@ -51,9 +51,9 @@ CacheVerdict = Serve | RetryPreferred | Fetch
 def verdict_for(
     candidates: Sequence[ForecastCache],
     local_now: datetime,
+    event: SolarEvent,
     preferred_available: bool,
     on_date: date | None = None,
-    event: SolarEvent = SolarEvent.SUNSET,
 ) -> CacheVerdict:
     """Decide what to do with the rows held for a user.
 

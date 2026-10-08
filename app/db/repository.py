@@ -87,16 +87,18 @@ class Repository:
         user_id: int,
         forecast_dates: Sequence[date],
         ttl_minutes: int,
-        event: SolarEvent = SolarEvent.SUNSET,
     ) -> list[ForecastCache]:
-        """Rows for `event` still inside the TTL for any of `forecast_dates`, soonest first."""
+        """Rows of either Solar Event still inside the TTL for any of `forecast_dates`.
+
+        Soonest first. Telling sunrise from sunset is the Cache Verdict's job, where
+        it is a pure, tested rule rather than a clause in a query.
+        """
         cutoff = datetime.now(UTC) - timedelta(minutes=ttl_minutes)
         result = await self.session.execute(
             select(ForecastCache)
             .where(
                 ForecastCache.user_id == user_id,
                 ForecastCache.forecast_date.in_(forecast_dates),
-                ForecastCache.event == event,
                 ForecastCache.fetched_at >= cutoff,
             )
             .order_by(ForecastCache.forecast_date)

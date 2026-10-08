@@ -16,7 +16,8 @@ from app.bot.card import palette, render_card
 from app.bot.keyboards import main_keyboard
 from app.bot.messages import format_forecast
 from app.services.scoring import score_sunset
-from app.services.solar import SolarEvent, days_to_ask, event_time
+from app.services.forecast_service import next_day_available
+from app.services.solar import SolarEvent, event_time
 from app.services.sunsethue import SunsethueClient, SunsethueError
 from app.services.weather import ForecastResult, OpenMeteoClient
 
@@ -115,8 +116,8 @@ def test_the_open_meteo_description_names_the_sunrise():
 # Sunsethue: asked for sunrise by name, and only for the day that matters.
 
 
-def a_sunsethue_payload(event: SolarEvent, on: date) -> dict:
-    at = event_time(event, on, KYIV_LAT, KYIV_LON)
+def a_sunsethue_payload(event: SolarEvent, on: date, at: datetime | None = None) -> dict:
+    at = at or event_time(event, on, KYIV_LAT, KYIV_LON)
     return {
         "time": datetime.now(UTC).isoformat(),
         "data": {
@@ -126,33 +127,61 @@ def a_sunsethue_payload(event: SolarEvent, on: date) -> dict:
             "quality_text": "great",
             "cloud_cover": 0.3,
             "direction": 95,
-            "time": at.isoformat().replace("+00:00", "Z"),
+            "time": at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
             "magics": {},
         },
     }
 
 
 class RecordingSunsethue(SunsethueClient):
-    def __init__(self) -> None:
+    """Answers from the equation, except on the days `times` overrides."""
+
+    def __init__(self, times: dict[date, datetime] | None = None) -> None:
         super().__init__("key")
+        self.times = times or {}
         self.asked: list[tuple[date, SolarEvent]] = []
 
     async def _fetch_event(self, client, latitude, longitude, forecast_date, event):
         self.asked.append((forecast_date, event))
-        return a_sunsethue_payload(event, forecast_date)
+        return a_sunsethue_payload(event, forecast_date, self.times.get(forecast_date))
 
 
-def test_sunsethue_is_asked_only_about_the_day_the_calculation_picks():
+def ask_for_sunrise(client: SunsethueClient) -> ForecastResult:
+    return asyncio.run(client.forecast_for_today(KYIV_LAT, KYIV_LON, "Europe/Kyiv", SolarEvent.SUNRISE))
+
+
+def test_after_dawn_sunsethue_is_asked_about_tomorrow_alone(monkeypatch):
+    tomorrow = datetime.now(KYIV).date() + timedelta(days=1)
+    monkeypatch.setattr("app.services.sunsethue.days_to_ask", lambda *_args: [tomorrow])
     client = RecordingSunsethue()
-    expected = days_to_ask(SolarEvent.SUNRISE, datetime.now(KYIV), KYIV_LAT, KYIV_LON)
-    result = asyncio.run(client.forecast_for_today(KYIV_LAT, KYIV_LON, "Europe/Kyiv", event=SolarEvent.SUNRISE))
 
-    asked_days = [day for day, _ in client.asked]
-    # Both days are only asked about inside the two-minute band around sunrise.
-    assert asked_days == expected[: len(asked_days)]
-    assert all(event is SolarEvent.SUNRISE for _, event in client.asked)
+    result = ask_for_sunrise(client)
+
+    assert client.asked == [(tomorrow, SolarEvent.SUNRISE)]
     assert result.event is SolarEvent.SUNRISE
-    assert result.event_at > datetime.now(UTC)
+    assert result.forecast_date == tomorrow
+
+
+def test_before_dawn_sunsethue_is_asked_about_today_alone(monkeypatch):
+    today = datetime.now(KYIV).date()
+    monkeypatch.setattr("app.services.sunsethue.days_to_ask", lambda *_args: [today])
+    client = RecordingSunsethue({today: datetime.now(UTC) + timedelta(hours=1)})
+
+    result = ask_for_sunrise(client)
+
+    assert client.asked == [(today, SolarEvent.SUNRISE)]
+    assert result.forecast_date == today
+
+
+def test_when_sunsethue_places_todays_event_in_the_past_tomorrow_is_asked_next(monkeypatch):
+    today = datetime.now(KYIV).date()
+    monkeypatch.setattr("app.services.sunsethue.days_to_ask", lambda *_args: [today])
+    client = RecordingSunsethue({today: datetime.now(UTC) - timedelta(minutes=5)})
+
+    result = ask_for_sunrise(client)
+
+    assert [day for day, _ in client.asked] == [today, today + timedelta(days=1)]
+    assert result.forecast_date == today + timedelta(days=1)
 
 
 def test_a_sunsethue_sunrise_is_worded_as_a_sunrise():
@@ -203,6 +232,20 @@ def test_the_sunrise_card_renders_and_differs_from_the_sunset_card():
     sunset = render_card(64, "завтра", "07:12", SolarEvent.SUNSET)
     assert Image.open(io.BytesIO(sunrise)).size == Image.open(io.BytesIO(sunset)).size
     assert sunrise != sunset
+
+
+# Завтра: one rule for every card, from today's sunset alone.
+
+
+def test_tomorrow_is_offered_while_todays_sunset_is_ahead():
+    sunset = event_time(SolarEvent.SUNSET, date(2026, 10, 8), KYIV_LAT, KYIV_LON).astimezone(KYIV)
+    assert next_day_available((KYIV_LAT, KYIV_LON), sunset - timedelta(hours=10)) is True
+    assert next_day_available((KYIV_LAT, KYIV_LON), sunset + timedelta(minutes=1)) is False
+
+
+def test_tomorrow_is_not_offered_where_the_sun_does_not_set_today():
+    polar_night = datetime(2024, 12, 21, 12, 0, tzinfo=ZoneInfo("Europe/Oslo"))
+    assert next_day_available((69.65, 18.96), polar_night) is False
 
 
 def test_the_sunrise_button_is_always_offered():

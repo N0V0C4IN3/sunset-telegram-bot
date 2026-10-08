@@ -23,8 +23,8 @@ from app.bot.keyboards import cancel_keyboard, location_keyboard, main_keyboard,
 from app.bot.messages import format_forecast, location_saved_text, score_info_text, settings_text
 from app.config import Settings
 from app.db.repository import Repository
-from app.services.forecast_service import ForecastService, is_provisional
-from app.services.solar import SolarEvent, days_to_ask
+from app.services.forecast_service import ForecastService, is_provisional, next_day_available
+from app.services.solar import SolarEvent
 from app.services.sunsethue import SunsethueClient
 from app.services.timezone import timezone_for_coordinates
 from app.services.weather import OpenMeteoClient, WeatherError
@@ -49,6 +49,27 @@ class HandlerContext:
 
 
 _context: HandlerContext | None = None
+
+
+@dataclass(frozen=True)
+class CardRequest:
+    """Which forecast card a button asks for.
+
+    `days_ahead` names a day; None means the next upcoming event, whichever day
+    that falls on. There is deliberately no "tomorrow's sunrise": after dawn the
+    next sunrise already is tomorrow's.
+    """
+
+    event: SolarEvent
+    days_ahead: int | None = None
+
+
+NEXT_SUNSET = CardRequest(SolarEvent.SUNSET)
+TOMORROWS_SUNSET = CardRequest(SolarEvent.SUNSET, days_ahead=1)
+NEXT_SUNRISE = CardRequest(SolarEvent.SUNRISE)
+
+# The callback data each card button carries.
+CARD_BUTTONS = {"today": NEXT_SUNSET, "tomorrow": TOMORROWS_SUNSET, "sunrise": NEXT_SUNRISE}
 
 
 def setup_router(
@@ -248,7 +269,7 @@ async def save_location(message: Message) -> None:
 
 @router.message(Command("today"))
 async def today_command(message: Message) -> None:
-    await send_today(message.bot, message.chat.id, message.from_user.id)
+    await send_card(message.bot, message.chat.id, message.from_user.id, NEXT_SUNSET)
 
 
 @router.message(Command("subscribe"))
@@ -266,33 +287,15 @@ async def settings_command(message: Message) -> None:
     await show_settings(message.bot, message.chat.id, message.from_user.id)
 
 
-@router.callback_query(F.data == "today")
-async def today_callback(callback: CallbackQuery) -> None:
+@router.callback_query(F.data.in_(CARD_BUTTONS))
+async def card_callback(callback: CallbackQuery) -> None:
     await answer_callback(callback)
-    await send_today(callback.bot, callback.message.chat.id, callback.from_user.id, callback.message.message_id)
-
-
-@router.callback_query(F.data == "tomorrow")
-async def tomorrow_callback(callback: CallbackQuery) -> None:
-    await answer_callback(callback)
-    await send_today(
+    await send_card(
         callback.bot,
         callback.message.chat.id,
         callback.from_user.id,
+        CARD_BUTTONS[callback.data],
         callback.message.message_id,
-        next_day=True,
-    )
-
-
-@router.callback_query(F.data == "sunrise")
-async def sunrise_callback(callback: CallbackQuery) -> None:
-    await answer_callback(callback)
-    await send_today(
-        callback.bot,
-        callback.message.chat.id,
-        callback.from_user.id,
-        callback.message.message_id,
-        event=SolarEvent.SUNRISE,
     )
 
 
@@ -416,13 +419,12 @@ async def text_input(message: Message) -> None:
     await show_settings(message.bot, message.chat.id, message.from_user.id)
 
 
-async def send_today(
+async def send_card(
     bot: Bot,
     chat_id: int,
     user_id: int,
+    request: CardRequest,
     message_id: int | None = None,
-    next_day: bool = False,
-    event: SolarEvent = SolarEvent.SUNSET,
 ) -> None:
     settings = app_settings()
     async with open_session() as session:
@@ -435,14 +437,14 @@ async def send_today(
         timezone = user.timezone
         local_now = datetime.now(ZoneInfo(timezone))
         local_today = local_now.date()
-        on_date = local_today + timedelta(days=1) if next_day else None
+        on_date = None if request.days_ahead is None else local_today + timedelta(days=request.days_ahead)
         try:
             result = await ForecastService(
                 session,
                 settings,
                 weather_client(),
                 sunsethue_client(),
-            ).today_for_user(user, on_date, event)
+            ).today_for_user(user, request.event, on_date)
             await session.commit()
         except WeatherError:
             logger.warning("forecast_unavailable")
@@ -451,15 +453,7 @@ async def send_today(
             )
             return
 
-        # Offer Завтра only while today's sunset is still ahead; once it passes,
-        # Сьогодні already serves tomorrow and there is no further day to show.
-        if event is SolarEvent.SUNSET:
-            show_next_day = result.forecast_date == local_today
-        else:
-            # A sunrise card says nothing about today's sunset, so work it out
-            # locally rather than spend a call on it.
-            latitude, longitude = repo.decrypt_location(user)
-            show_next_day = days_to_ask(SolarEvent.SUNSET, local_now, latitude, longitude)[0] == local_today
+        show_next_day = next_day_available(repo.decrypt_location(user), local_now)
 
     caption = format_forecast(result, timezone, provisional=is_provisional(result, sunsethue_client()))
     png = await render_forecast_card(result, timezone)

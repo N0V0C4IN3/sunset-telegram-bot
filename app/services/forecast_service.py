@@ -8,7 +8,7 @@ from app.config import Settings
 from app.db.models import ForecastCache, User
 from app.db.repository import Repository
 from app.services.cache_verdict import Fetch, RetryPreferred, Serve, verdict_for
-from app.services.solar import SolarEvent
+from app.services.solar import SolarEvent, event_time
 from app.services.sunsethue import PROVIDER_SUNSETHUE, SunsethueClient, SunsethueError
 from app.services.weather import ForecastResult, OpenMeteoClient
 
@@ -32,8 +32,8 @@ class ForecastService:
     async def today_for_user(
         self,
         user: User,
+        event: SolarEvent,
         on_date: date | None = None,
-        event: SolarEvent = SolarEvent.SUNSET,
     ) -> ForecastResult:
         """The user's next `event`, or the one on `on_date` when a day is named."""
         location = self.repo.decrypt_location(user)
@@ -47,20 +47,19 @@ class ForecastService:
             user.id,
             [local_today, local_today + timedelta(days=1)],
             self.settings.forecast_cache_ttl_minutes,
-            event,
         )
 
-        match verdict_for(candidates, local_now, self.sunsethue_client.is_configured, on_date, event):
+        match verdict_for(candidates, local_now, event, self.sunsethue_client.is_configured, on_date):
             case Serve(cached):
                 return _from_cache(cached)
             case RetryPreferred(held):
-                upgraded = await self._retry_preferred_provider(latitude, longitude, user.timezone, on_date, event)
+                upgraded = await self._retry_preferred_provider(latitude, longitude, user.timezone, event, on_date)
                 if upgraded is None:
                     return _from_cache(held)
                 await self._store(user.id, upgraded)
                 return upgraded
             case Fetch():
-                result = await self._fetch_forecast(latitude, longitude, user.timezone, on_date, event)
+                result = await self._fetch_forecast(latitude, longitude, user.timezone, event, on_date)
                 await self._store(user.id, result)
                 return result
 
@@ -81,8 +80,8 @@ class ForecastService:
         latitude: float,
         longitude: float,
         timezone: str,
+        event: SolarEvent,
         on_date: date | None = None,
-        event: SolarEvent = SolarEvent.SUNSET,
     ) -> ForecastResult | None:
         """Re-ask Sunsethue for a forecast we currently hold provisionally.
 
@@ -92,7 +91,7 @@ class ForecastService:
         if not self.sunsethue_client.is_configured:
             return None
         try:
-            return await self.sunsethue_client.forecast_for_today(latitude, longitude, timezone, on_date, event)
+            return await self.sunsethue_client.forecast_for_today(latitude, longitude, timezone, event, on_date)
         except SunsethueError as exc:
             logger.info("sunsethue_retry_declined reason=%s", exc)
             return None
@@ -102,12 +101,12 @@ class ForecastService:
         latitude: float,
         longitude: float,
         timezone: str,
+        event: SolarEvent,
         on_date: date | None = None,
-        event: SolarEvent = SolarEvent.SUNSET,
     ) -> ForecastResult:
         if self.sunsethue_client.is_configured:
             try:
-                return await self.sunsethue_client.forecast_for_today(latitude, longitude, timezone, on_date, event)
+                return await self.sunsethue_client.forecast_for_today(latitude, longitude, timezone, event, on_date)
             except SunsethueError as exc:
                 logger.warning("sunsethue_forecast_unavailable fallback=open_meteo reason=%s", exc)
 
@@ -115,9 +114,22 @@ class ForecastService:
             latitude,
             longitude,
             timezone,
-            on_date,
             event,
+            on_date,
         )
+
+
+def next_day_available(location: tuple[float, float], local_now: datetime) -> bool:
+    """Whether Завтра has a day to offer: true while today's sunset is still ahead.
+
+    Once it passes, Сьогодні already serves tomorrow and the forecast window holds
+    nothing further. Worked out locally so a sunrise card, which carries no sunset,
+    answers the same way a sunset card does — and costs no provider call. With no
+    sunset today at all (polar day or night) there is nothing to step past.
+    """
+    latitude, longitude = location
+    sunset = event_time(SolarEvent.SUNSET, local_now.date(), latitude, longitude)
+    return sunset is not None and sunset > local_now
 
 
 def is_provisional(result: ForecastResult, sunsethue_client: SunsethueClient) -> bool:
@@ -128,10 +140,10 @@ def is_provisional(result: ForecastResult, sunsethue_client: SunsethueClient) ->
 def _from_cache(cache: ForecastCache) -> ForecastResult:
     return ForecastResult(
         provider=cache.provider,
+        event=SolarEvent(cache.event),
         forecast_date=cache.forecast_date,
         event_at=cache.event_at,
         score=cache.score,
         description=cache.description,
         weather_data=cache.weather_data,
-        event=SolarEvent(cache.event),
     )

@@ -12,10 +12,14 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from app.services.scheduler import notify_subscriber, run_notification_scan
+from app.services.solar import SolarEvent
 from app.services.weather import ForecastResult
 
 TZ = "Europe/Kyiv"
 SUNSET = datetime(2026, 8, 31, 20, 0, tzinfo=ZoneInfo(TZ))
+# Kyiv's real sunset that day is about 19:40, so the notification window sits
+# before it and Завтра is still on offer.
+KYIV_LOCATION = (50.45, 30.52)
 
 
 @dataclass
@@ -58,6 +62,9 @@ class FakeRepo:
     async def delete_old_forecasts(self, retention_days):
         return 0
 
+    def decrypt_location(self, user):
+        return KYIV_LOCATION
+
 
 class FakeSession:
     """Commits and rolls back the repo's pending marks, like the real unit of work."""
@@ -99,6 +106,7 @@ class FakeBot:
 def forecast(score: int) -> ForecastResult:
     return ForecastResult(
         provider="sunsethue",
+        event=SolarEvent.SUNSET,
         forecast_date=SUNSET.date(),
         event_at=SUNSET,
         score=score,
@@ -168,6 +176,7 @@ async def test_a_provisional_score_below_threshold_leaves_the_day_open():
     user, repo, bot = FakeUser(1), FakeRepo([]), FakeBot()
     provisional = ForecastResult(
         provider="open_meteo",
+        event=SolarEvent.SUNSET,
         forecast_date=SUNSET.date(),
         event_at=SUNSET,
         score=10,
@@ -197,7 +206,7 @@ def scan(monkeypatch):
             def __init__(self, *args, **kwargs):
                 pass
 
-            async def today_for_user(self, user, on_date=None):
+            async def today_for_user(self, user, event, on_date=None):
                 return forecast((scores or {}).get(user.id, 90))
 
         monkeypatch.setattr("app.services.scheduler.Repository", lambda _session: repo)

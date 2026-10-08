@@ -7,6 +7,7 @@ from PIL import Image
 from app.bot.card import HEIGHT, WIDTH, palette, render_card
 from app.bot.keyboards import main_keyboard, settings_keyboard
 from app.bot.messages import day_label, format_forecast, local_event_time
+from app.services.solar import SolarEvent
 from app.services.weather import ForecastResult
 
 KYIV = ZoneInfo("Europe/Kyiv")
@@ -17,6 +18,7 @@ def a_forecast(score: int = 72, provider: str = "sunsethue", days_ahead: int = 0
     event_at += timedelta(days=days_ahead)
     return ForecastResult(
         provider=provider,
+        event=SolarEvent.SUNSET,
         forecast_date=event_at.date(),
         event_at=event_at,
         score=score,
@@ -67,6 +69,7 @@ def test_sunset_time_is_rendered_in_the_users_zone():
 def test_a_naive_sunset_is_read_as_local():
     result = ForecastResult(
         provider="open_meteo",
+        event=SolarEvent.SUNSET,
         forecast_date=datetime(2026, 8, 28).date(),
         event_at=datetime(2026, 8, 28, 20, 14),
         score=50,
@@ -80,38 +83,38 @@ def test_a_naive_sunset_is_read_as_local():
 
 
 def test_the_card_is_a_png_of_the_expected_size():
-    image = Image.open(io.BytesIO(render_card(72, "сьогодні", "20:14")))
+    image = Image.open(io.BytesIO(render_card(72, "сьогодні", "20:14", SolarEvent.SUNSET)))
     assert image.format == "PNG"
     assert image.size == (WIDTH, HEIGHT)
 
 
 def test_the_card_renders_at_both_extremes():
     for score in (0, 100):
-        assert Image.open(io.BytesIO(render_card(score, "сьогодні", "20:14"))).size == (WIDTH, HEIGHT)
+        assert Image.open(io.BytesIO(render_card(score, "сьогодні", "20:14", SolarEvent.SUNSET))).size == (WIDTH, HEIGHT)
 
 
 def test_the_card_clamps_a_score_outside_the_scale():
-    assert render_card(140, "сьогодні", "20:14") == render_card(100, "сьогодні", "20:14")
-    assert render_card(-10, "сьогодні", "20:14") == render_card(0, "сьогодні", "20:14")
+    assert render_card(140, "сьогодні", "20:14", SolarEvent.SUNSET) == render_card(100, "сьогодні", "20:14", SolarEvent.SUNSET)
+    assert render_card(-10, "сьогодні", "20:14", SolarEvent.SUNSET) == render_card(0, "сьогодні", "20:14", SolarEvent.SUNSET)
 
 
 def test_a_better_score_makes_a_warmer_sky():
     """The gradient carries the verdict before the number is read."""
-    poor_red = palette(10)[3][0]
-    great_red = palette(95)[3][0]
+    poor_red = palette(10, SolarEvent.SUNSET)[3][0]
+    great_red = palette(95, SolarEvent.SUNSET)[3][0]
     assert great_red > poor_red
 
 
 def test_the_palette_is_continuous_across_the_old_band_edges():
     """Banding these made 44 and 45 look like different weather."""
     for edge in (45, 65, 70, 80):
-        before, after = palette(edge - 1), palette(edge)
+        before, after = palette(edge - 1, SolarEvent.SUNSET), palette(edge, SolarEvent.SUNSET)
         for low, high in zip(before, after):
             assert max(abs(a - b) for a, b in zip(low, high)) <= 3
 
 
 def test_the_card_is_deterministic():
-    assert render_card(63, "завтра", "20:41") == render_card(63, "завтра", "20:41")
+    assert render_card(63, "завтра", "20:41", SolarEvent.SUNSET) == render_card(63, "завтра", "20:41", SolarEvent.SUNSET)
 
 
 # The keyboard.

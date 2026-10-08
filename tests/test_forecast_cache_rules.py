@@ -36,13 +36,13 @@ class FakeCache:
 
 def test_nothing_held_means_fetch():
     local_now = datetime(2026, 8, 27, 18, 0, tzinfo=KYIV)
-    assert verdict_for([], local_now, preferred_available=True) == Fetch()
+    assert verdict_for([], local_now, SolarEvent.SUNSET, preferred_available=True) == Fetch()
 
 
 def test_a_passed_sunset_is_not_servable():
     local_now = datetime(2026, 8, 27, 21, 0, tzinfo=KYIV)
     passed = FakeCache(event_at=local_now - timedelta(minutes=1), fetched_at=local_now, provider="sunsethue")
-    assert verdict_for([passed], local_now, preferred_available=True) == Fetch()
+    assert verdict_for([passed], local_now, SolarEvent.SUNSET, preferred_available=True) == Fetch()
 
 
 def test_a_current_sunsethue_row_is_served():
@@ -53,7 +53,7 @@ def test_a_current_sunsethue_row_is_served():
         fetched_at=datetime(2026, 8, 27, 17, 0, tzinfo=UTC),
         provider="sunsethue",
     )
-    assert verdict_for([cache], local_now, preferred_available=True) == Serve(cache)
+    assert verdict_for([cache], local_now, SolarEvent.SUNSET, preferred_available=True) == Serve(cache)
 
 
 def test_a_sunsethue_row_is_dropped_once_a_model_update_lands():
@@ -63,19 +63,19 @@ def test_a_sunsethue_row_is_dropped_once_a_model_update_lands():
         fetched_at=datetime(2026, 8, 27, 15, 0, tzinfo=UTC),
         provider="sunsethue",
     )
-    assert verdict_for([cache], local_now, preferred_available=True) == Fetch()
+    assert verdict_for([cache], local_now, SolarEvent.SUNSET, preferred_available=True) == Fetch()
 
 
 def test_a_provisional_row_sends_us_back_to_the_preferred_provider():
     local_now = datetime(2026, 8, 27, 18, 0, tzinfo=KYIV)
     cache = FakeCache(event_at=local_now + timedelta(hours=2), fetched_at=local_now)
-    assert verdict_for([cache], local_now, preferred_available=True) == RetryPreferred(cache)
+    assert verdict_for([cache], local_now, SolarEvent.SUNSET, preferred_available=True) == RetryPreferred(cache)
 
 
 def test_a_provisional_row_is_served_when_there_is_nobody_better_to_ask():
     local_now = datetime(2026, 8, 27, 18, 0, tzinfo=KYIV)
     cache = FakeCache(event_at=local_now + timedelta(hours=2), fetched_at=local_now)
-    assert verdict_for([cache], local_now, preferred_available=False) == Serve(cache)
+    assert verdict_for([cache], local_now, SolarEvent.SUNSET, preferred_available=False) == Serve(cache)
 
 
 def test_tomorrows_row_is_used_once_todays_sunset_has_passed():
@@ -90,7 +90,7 @@ def test_tomorrows_row_is_used_once_todays_sunset_has_passed():
         fetched_at=datetime(2026, 8, 27, 17, 0, tzinfo=UTC),
         provider="sunsethue",
     )
-    assert verdict_for([today, tomorrow], local_now, preferred_available=True) == Serve(tomorrow)
+    assert verdict_for([today, tomorrow], local_now, SolarEvent.SUNSET, preferred_available=True) == Serve(tomorrow)
 
 
 def test_a_stale_sunsethue_row_does_not_hide_tomorrows_provisional_row():
@@ -105,13 +105,13 @@ def test_a_stale_sunsethue_row_does_not_hide_tomorrows_provisional_row():
         event_at=datetime(2026, 8, 28, 20, 28, tzinfo=KYIV),
         fetched_at=datetime(2026, 8, 27, 9, 0, tzinfo=UTC),
     )
-    assert verdict_for([today, tomorrow], local_now, preferred_available=True) == RetryPreferred(tomorrow)
+    assert verdict_for([today, tomorrow], local_now, SolarEvent.SUNSET, preferred_available=True) == RetryPreferred(tomorrow)
 
 
 def test_a_naive_sunset_is_read_in_the_users_timezone():
     local_now = datetime(2026, 8, 27, 18, 0, tzinfo=KYIV)
     cache = FakeCache(event_at=datetime(2026, 8, 27, 20, 0), fetched_at=local_now)
-    assert verdict_for([cache], local_now, preferred_available=False) == Serve(cache)
+    assert verdict_for([cache], local_now, SolarEvent.SUNSET, preferred_available=False) == Serve(cache)
 
 
 # Naming a day: what the Завтра button asks for.
@@ -130,7 +130,7 @@ def test_naming_a_day_skips_the_row_for_the_other_day():
         provider="sunsethue",
     )
     candidates = [today, tomorrow]
-    verdict = verdict_for(candidates, local_now, preferred_available=True, on_date=tomorrow.forecast_date)
+    verdict = verdict_for(candidates, local_now, SolarEvent.SUNSET, preferred_available=True, on_date=tomorrow.forecast_date)
     assert verdict == Serve(tomorrow)
 
 
@@ -141,7 +141,7 @@ def test_naming_a_day_we_hold_nothing_for_means_fetch():
         fetched_at=datetime(2026, 8, 27, 17, 0, tzinfo=UTC),
         provider="sunsethue",
     )
-    verdict = verdict_for([today], local_now, preferred_available=True, on_date=date(2026, 8, 28))
+    verdict = verdict_for([today], local_now, SolarEvent.SUNSET, preferred_available=True, on_date=date(2026, 8, 28))
     assert verdict == Fetch()
 
 
@@ -151,7 +151,7 @@ def test_a_named_day_still_re_asks_the_preferred_provider_for_a_provisional_row(
         event_at=datetime(2026, 8, 28, 20, 28, tzinfo=KYIV),
         fetched_at=datetime(2026, 8, 27, 17, 0, tzinfo=UTC),
     )
-    verdict = verdict_for([tomorrow], local_now, preferred_available=True, on_date=tomorrow.forecast_date)
+    verdict = verdict_for([tomorrow], local_now, SolarEvent.SUNSET, preferred_available=True, on_date=tomorrow.forecast_date)
     assert verdict == RetryPreferred(tomorrow)
 
 
@@ -165,7 +165,7 @@ def test_a_sunset_row_does_not_answer_for_a_sunrise():
         fetched_at=datetime(2026, 8, 27, 17, 0, tzinfo=UTC),
         provider="sunsethue",
     )
-    assert verdict_for([sunset], local_now, preferred_available=True, event=SolarEvent.SUNRISE) == Fetch()
+    assert verdict_for([sunset], local_now, SolarEvent.SUNRISE, preferred_available=True) == Fetch()
 
 
 def test_a_sunrise_row_is_served_for_a_sunrise_alongside_a_sunset_row():
@@ -176,14 +176,14 @@ def test_a_sunrise_row_is_served_for_a_sunrise_alongside_a_sunset_row():
     )
     sunset = FakeCache(event_at=datetime(2026, 8, 28, 20, 28, tzinfo=KYIV), fetched_at=fetched_at, provider="sunsethue")
     candidates = [sunrise, sunset]
-    assert verdict_for(candidates, local_now, preferred_available=True, event=SolarEvent.SUNRISE) == Serve(sunrise)
-    assert verdict_for(candidates, local_now, preferred_available=True) == Serve(sunset)
+    assert verdict_for(candidates, local_now, SolarEvent.SUNRISE, preferred_available=True) == Serve(sunrise)
+    assert verdict_for(candidates, local_now, SolarEvent.SUNSET, preferred_available=True) == Serve(sunset)
 
 
 def test_a_provisional_sunrise_re_asks_the_preferred_provider():
     local_now = datetime(2026, 8, 27, 21, 0, tzinfo=KYIV)
     sunrise = FakeCache(event_at=datetime(2026, 8, 28, 6, 12, tzinfo=KYIV), fetched_at=local_now, event="sunrise")
-    verdict = verdict_for([sunrise], local_now, preferred_available=True, event=SolarEvent.SUNRISE)
+    verdict = verdict_for([sunrise], local_now, SolarEvent.SUNRISE, preferred_available=True)
     assert verdict == RetryPreferred(sunrise)
 
 

@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from app.services.solar import SolarEvent
+from app.services.solar import WORDS, SolarEvent
 
 
 @dataclass(frozen=True)
@@ -10,7 +10,11 @@ class SunsetScore:
 
 
 def score_sunset(weather: dict, event: SolarEvent = SolarEvent.SUNSET) -> SunsetScore:
-    """Score the weather around a Solar Event. `event` only changes the wording."""
+    """Score the weather around a Solar Event. `event` only changes the wording.
+
+    It defaults to sunset because the autoresearch harness scores its harvested
+    sunset corpus through this exact call shape.
+    """
     cloud = _value(weather, "cloud_cover", 50)
     low = _value(weather, "cloud_cover_low", cloud)
     low_max = _value(weather, "cloud_cover_low_max", low)
@@ -154,14 +158,13 @@ def _build_description(
     weather: dict,
     event: SolarEvent,
 ) -> str:
-    # Nominative and genitive: "непоганий захід", "у вікні заходу".
-    noun, of_noun = ("схід", "сходу") if event is SolarEvent.SUNRISE else ("захід", "заходу")
+    words = WORDS[event]
     if score >= 80:
         opener = "Виглядає дуже перспективно"
     elif score >= 65:
         opener = "Варто вийти й перевірити"
     elif score >= 45:
-        opener = f"Є шанс на непоганий {noun}"
+        opener = f"Є шанс на непоганий {words.noun}"
     else:
         opener = "Схоже, сьогодні без великої драми на небі"
 
@@ -189,9 +192,9 @@ def _build_description(
         cautions.append("серпанок, вологість або забруднення можуть приглушити кольори")
 
     if consistency_score >= 75:
-        reasons.append(f"прогноз у вікні {of_noun} досить стабільний")
+        reasons.append(f"прогноз у вікні {words.of_noun} досить стабільний")
     elif consistency_score < 45:
-        cautions.append(f"прогноз швидко змінюється біля {of_noun}")
+        cautions.append(f"прогноз швидко змінюється біля {words.of_noun}")
 
     air_quality = weather.get("air_quality") or {}
     if any(_optional_value(air_quality, field) is not None for field in ["pm10", "pm2_5", "aerosol_optical_depth", "dust"]):

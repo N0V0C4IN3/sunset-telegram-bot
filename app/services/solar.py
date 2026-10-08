@@ -7,6 +7,7 @@ poles), so a provider is only asked for the day that matters.
 """
 
 import math
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 
@@ -14,6 +15,21 @@ from enum import StrEnum
 class SolarEvent(StrEnum):
     SUNRISE = "sunrise"
     SUNSET = "sunset"
+
+
+@dataclass(frozen=True)
+class EventWords:
+    """How each Solar Event is named in Ukrainian copy."""
+
+    noun: str  # "красивий захід"
+    of_noun: str  # "умови для заходу"
+    verb: str  # "сонце сідає"
+
+
+WORDS = {
+    SolarEvent.SUNSET: EventWords(noun="захід", of_noun="заходу", verb="сідає"),
+    SolarEvent.SUNRISE: EventWords(noun="схід", of_noun="сходу", verb="сходить"),
+}
 
 
 # Wider than the equation's error, so a borderline call asks about both days
