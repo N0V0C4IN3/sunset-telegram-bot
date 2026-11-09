@@ -296,14 +296,20 @@ async def settings_command(message: Message) -> None:
 
 @router.callback_query(F.data.in_(CARD_BUTTONS))
 async def card_callback(callback: CallbackQuery) -> None:
-    await answer_callback(callback)
-    await send_card(
-        callback.bot,
-        callback.message.chat.id,
-        callback.from_user.id,
-        CARD_BUTTONS[callback.data],
-        callback.message.message_id,
-    )
+    # Answered only once the card is in place: the answer stops the button's
+    # spinner, and Telegram can take anywhere from 0.2 to 30 s to accept a new
+    # card image. Answering first left a still card under a stopped spinner,
+    # which reads as a hung bot. `finally`, so a failed card still answers.
+    try:
+        await send_card(
+            callback.bot,
+            callback.message.chat.id,
+            callback.from_user.id,
+            CARD_BUTTONS[callback.data],
+            callback.message.message_id,
+        )
+    finally:
+        await answer_callback(callback)
 
 
 @router.callback_query(F.data == "settings")
