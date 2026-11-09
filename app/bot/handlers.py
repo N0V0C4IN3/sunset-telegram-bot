@@ -1,5 +1,4 @@
 import logging
-import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -20,6 +19,7 @@ from aiogram.types import (
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.bot.card import render_forecast_card
+from app.bot.tracing import CardPhases, card_phases
 from app.bot.keyboards import cancel_keyboard, location_keyboard, main_keyboard, settings_keyboard
 from app.bot.messages import format_forecast, location_saved_text, score_info_text, settings_text
 from app.config import Settings
@@ -299,7 +299,7 @@ async def card_callback(callback: CallbackQuery) -> None:
     # Answered only once the card is in place: the answer stops the button's
     # spinner, and Telegram can take anywhere from 0.2 to 30 s to accept a new
     # card image. Answering first left a still card under a stopped spinner,
-    # which reads as a hung bot. `finally`, so a failed card still answers.
+    # which reads as a hung bot. A failed card still answers.
     try:
         await send_card(
             callback.bot,
@@ -308,8 +308,15 @@ async def card_callback(callback: CallbackQuery) -> None:
             CARD_BUTTONS[callback.data],
             callback.message.message_id,
         )
-    finally:
-        await answer_callback(callback)
+    except Exception:
+        # Still stop the spinner, but never let a failed answer replace the
+        # card's own error.
+        try:
+            await answer_callback(callback)
+        except Exception:
+            logger.info("callback_answer_failed")
+        raise
+    await answer_callback(callback)
 
 
 @router.callback_query(F.data == "settings")
@@ -441,12 +448,24 @@ async def send_card(
     request: CardRequest,
     message_id: int | None = None,
 ) -> None:
+    with card_phases(event=request.event, edit=message_id is not None) as card:
+        await _send_card(bot, chat_id, user_id, request, message_id, card)
+
+
+async def _send_card(
+    bot: Bot,
+    chat_id: int,
+    user_id: int,
+    request: CardRequest,
+    message_id: int | None,
+    card: CardPhases,
+) -> None:
     settings = app_settings()
-    started = time.perf_counter()
     async with open_session() as session:
         repo = Repository(session)
         user = await repo.get_user_with_settings(user_id)
         if user is None or user.latitude_encrypted is None or user.longitude_encrypted is None:
+            card.note(outcome="no_location")
             await bot.send_message(chat_id, "Спочатку поділіться локацією, інакше я вгадуватиму по кавовій гущі.", reply_markup=location_keyboard())
             return
         subscribed = user.settings.subscribed
@@ -454,30 +473,27 @@ async def send_card(
         local_now = datetime.now(ZoneInfo(timezone))
         local_today = local_now.date()
         on_date = None if request.days_ahead is None else local_today + timedelta(days=request.days_ahead)
-        loaded = time.perf_counter()
+        card.lap("load")
+        forecasts = ForecastService(session, settings, weather_client(), sunsethue_client())
         try:
-            result = await ForecastService(
-                session,
-                settings,
-                weather_client(),
-                sunsethue_client(),
-            ).today_for_user(user, request.event, on_date)
-            forecast_ready = time.perf_counter()
+            result = await forecasts.today_for_user(user, request.event, on_date)
+            card.note(verdict=forecasts.verdict)
+            card.lap("forecast")
             await session.commit()
         except WeatherError:
+            card.note(verdict=forecasts.verdict, outcome="forecast_unavailable")
             logger.warning("forecast_unavailable")
             await send_or_edit(
                 bot, chat_id, message_id, "Прогноз погоди тимчасово недоступний. Спробуйте трохи пізніше."
             )
             return
 
-        committed = time.perf_counter()
+        card.lap("commit")
         show_next_day = offers_next_day(repo, user)
 
     caption = format_forecast(result, timezone, provisional=is_provisional(result, sunsethue_client()))
-    rendering = time.perf_counter()
     png = await render_forecast_card(result, timezone)
-    rendered = time.perf_counter()
+    card.lap("render")
     await send_or_edit_card(
         bot,
         chat_id,
@@ -486,23 +502,7 @@ async def send_card(
         caption,
         main_keyboard(subscribed, show_next_day=show_next_day),
     )
-    done = time.perf_counter()
-    # Diagnostics for the card-latency investigation; see app/bot/tracing.py.
-    logger.info(
-        "card_timing event=%s edit=%s load_ms=%d forecast_ms=%d commit_ms=%d render_ms=%d telegram_ms=%d total_ms=%d",
-        request.event,
-        message_id is not None,
-        _ms(started, loaded),
-        _ms(loaded, forecast_ready),
-        _ms(forecast_ready, committed),
-        _ms(rendering, rendered),
-        _ms(rendered, done),
-        _ms(started, done),
-    )
-
-
-def _ms(start: float, end: float) -> int:
-    return round(1000 * (end - start))
+    card.lap("telegram")
 
 
 async def set_subscription(

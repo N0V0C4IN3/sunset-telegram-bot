@@ -48,3 +48,18 @@ async def test_a_failed_card_still_answers_the_button(monkeypatch, calls):
         await handlers.card_callback(card_press())
 
     assert calls == ["answer"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_answer_does_not_hide_the_cards_own_error(monkeypatch):
+    async def send_card(*args, **kwargs):
+        raise RuntimeError("card failed")
+
+    async def answer(callback, text=None):
+        raise ConnectionError("answer failed")
+
+    monkeypatch.setattr(handlers, "send_card", send_card)
+    monkeypatch.setattr(handlers, "answer_callback", answer)
+
+    with pytest.raises(RuntimeError, match="card failed"):
+        await handlers.card_callback(card_press())
