@@ -1,4 +1,5 @@
 import logging
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -435,6 +436,7 @@ async def send_card(
     message_id: int | None = None,
 ) -> None:
     settings = app_settings()
+    started = time.perf_counter()
     async with open_session() as session:
         repo = Repository(session)
         user = await repo.get_user_with_settings(user_id)
@@ -446,6 +448,7 @@ async def send_card(
         local_now = datetime.now(ZoneInfo(timezone))
         local_today = local_now.date()
         on_date = None if request.days_ahead is None else local_today + timedelta(days=request.days_ahead)
+        loaded = time.perf_counter()
         try:
             result = await ForecastService(
                 session,
@@ -453,6 +456,7 @@ async def send_card(
                 weather_client(),
                 sunsethue_client(),
             ).today_for_user(user, request.event, on_date)
+            forecast_ready = time.perf_counter()
             await session.commit()
         except WeatherError:
             logger.warning("forecast_unavailable")
@@ -461,10 +465,13 @@ async def send_card(
             )
             return
 
+        committed = time.perf_counter()
         show_next_day = offers_next_day(repo, user)
 
     caption = format_forecast(result, timezone, provisional=is_provisional(result, sunsethue_client()))
+    rendering = time.perf_counter()
     png = await render_forecast_card(result, timezone)
+    rendered = time.perf_counter()
     await send_or_edit_card(
         bot,
         chat_id,
@@ -473,6 +480,23 @@ async def send_card(
         caption,
         main_keyboard(subscribed, show_next_day=show_next_day),
     )
+    done = time.perf_counter()
+    # Diagnostics for the card-latency investigation; see app/bot/tracing.py.
+    logger.info(
+        "card_timing event=%s edit=%s load_ms=%d forecast_ms=%d commit_ms=%d render_ms=%d telegram_ms=%d total_ms=%d",
+        request.event,
+        message_id is not None,
+        _ms(started, loaded),
+        _ms(loaded, forecast_ready),
+        _ms(forecast_ready, committed),
+        _ms(rendering, rendered),
+        _ms(rendered, done),
+        _ms(started, done),
+    )
+
+
+def _ms(start: float, end: float) -> int:
+    return round(1000 * (end - start))
 
 
 async def set_subscription(

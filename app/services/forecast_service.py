@@ -51,14 +51,17 @@ class ForecastService:
 
         match verdict_for(candidates, local_now, event, self.sunsethue_client.is_configured, on_date):
             case Serve(cached):
+                logger.info("forecast_source verdict=serve event=%s", event)
                 return _from_cache(cached)
             case RetryPreferred(held):
+                logger.info("forecast_source verdict=retry_preferred event=%s", event)
                 upgraded = await self._retry_preferred_provider(latitude, longitude, user.timezone, event, on_date)
                 if upgraded is None:
                     return _from_cache(held)
                 await self._store(user.id, upgraded)
                 return upgraded
             case Fetch():
+                logger.info("forecast_source verdict=fetch event=%s", event)
                 result = await self._fetch_forecast(latitude, longitude, user.timezone, event, on_date)
                 await self._store(user.id, result)
                 return result
