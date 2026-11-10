@@ -25,6 +25,13 @@ FONT_REGULAR = str(FONTS / "DejaVuSans.ttf")
 
 WIDTH, HEIGHT = 1024, 536
 
+# The card goes out as JPEG. Telegram re-encodes every photo to JPEG on receipt,
+# so a PNG never reached the chat anyway; it only cost upload: the PNG was
+# 90-150 KiB, this is 25-35 KiB with no visible difference, even zoomed on the sun.
+# A palette PNG, which the air-quality bot uses for flat charts, would band the sky.
+CARD_FILENAME = "sunset.jpg"
+JPEG_QUALITY = 85
+
 # The glow is blurred, which is the expensive part, so it is built at a fraction
 # of the final size and scaled up. The blur hides the resampling.
 GLOW_SCALE = 4
@@ -184,7 +191,7 @@ def _background(score: int, event: SolarEvent) -> Image.Image:
 
 
 def render_card(score: int, day_label: str, event_time: str, event: SolarEvent) -> bytes:
-    """A PNG of the score card, ready for sendPhoto."""
+    """A JPEG of the score card, ready for sendPhoto as `CARD_FILENAME`."""
     score = max(0, min(100, score))
     # Copied because the cached background must never be drawn on.
     image = _background(score, event).copy()
@@ -194,7 +201,7 @@ def render_card(score: int, day_label: str, event_time: str, event: SolarEvent) 
     _text(image, TIME_AT, time_line, _font(FONT_REGULAR, 36), (250, 246, 242), shadow=170)
 
     buffer = io.BytesIO()
-    image.save(buffer, format="PNG", compress_level=1)
+    image.convert("RGB").save(buffer, format="JPEG", quality=JPEG_QUALITY, optimize=True, progressive=True)
     return buffer.getvalue()
 
 

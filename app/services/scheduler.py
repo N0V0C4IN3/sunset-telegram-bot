@@ -7,7 +7,7 @@ from aiogram import Bot
 from aiogram.types import BufferedInputFile
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from app.bot.card import render_forecast_card
+from app.bot.card import CARD_FILENAME, render_forecast_card
 from app.bot.keyboards import main_keyboard
 from app.bot.messages import format_forecast
 from app.config import Settings
@@ -79,7 +79,7 @@ async def notify_subscriber(
         return False
 
     caption = format_forecast(forecast, user.timezone, provisional=provisional)
-    png = await render_forecast_card(forecast, user.timezone)
+    image = await render_forecast_card(forecast, user.timezone)
     # The same keyboard /today shows, so its buttons edit the notification in
     # place, and Завтра follows the same rule as everywhere else.
     keyboard = main_keyboard(
@@ -88,7 +88,7 @@ async def notify_subscriber(
     )
     await bot.send_photo(
         user.id,
-        BufferedInputFile(png, filename="sunset.png"),
+        BufferedInputFile(image, filename=CARD_FILENAME),
         caption=caption,
         reply_markup=keyboard,
     )

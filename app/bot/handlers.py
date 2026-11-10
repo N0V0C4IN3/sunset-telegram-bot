@@ -18,7 +18,7 @@ from aiogram.types import (
 )
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from app.bot.card import render_forecast_card
+from app.bot.card import CARD_FILENAME, render_forecast_card
 from app.bot.tracing import CardPhases, card_phases
 from app.bot.keyboards import cancel_keyboard, location_keyboard, main_keyboard, settings_keyboard
 from app.bot.messages import format_forecast, location_saved_text, score_info_text, settings_text
@@ -187,7 +187,7 @@ async def send_or_edit_card(
     bot: Bot,
     chat_id: int,
     message_id: int | None,
-    png: bytes,
+    image: bytes,
     caption: str,
     reply_markup: InlineKeyboardMarkup | None = None,
 ) -> None:
@@ -196,7 +196,7 @@ async def send_or_edit_card(
     editMessageMedia replaces a text message with media as well as swapping one
     photo for another, so both /settings -> card and card -> card edit cleanly.
     """
-    photo = BufferedInputFile(png, filename="sunset.png")
+    photo = BufferedInputFile(image, filename=CARD_FILENAME)
     if message_id is not None:
         try:
             await bot.edit_message_media(
@@ -492,13 +492,13 @@ async def _send_card(
         show_next_day = offers_next_day(repo, user)
 
     caption = format_forecast(result, timezone, provisional=is_provisional(result, sunsethue_client()))
-    png = await render_forecast_card(result, timezone)
+    image = await render_forecast_card(result, timezone)
     card.lap("render")
     await send_or_edit_card(
         bot,
         chat_id,
         message_id,
-        png,
+        image,
         caption,
         main_keyboard(subscribed, show_next_day=show_next_day),
     )
