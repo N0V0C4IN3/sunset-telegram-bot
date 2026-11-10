@@ -2,6 +2,14 @@
 
 A self-hosted Telegram bot that predicts whether today's sunset is likely to be worth watching.
 
+<p align="center">
+  <img src=".github/readme/card-sunset-high.jpg" width="32%" alt="Sunset card scoring 86%: a deep orange and violet sky, 'сьогодні, захід о 16:24'">
+  <img src=".github/readme/card-sunrise-mid.jpg" width="32%" alt="Sunrise card scoring 52%: a softer pink and blue sky, 'завтра, схід о 06:58'">
+  <img src=".github/readme/card-sunset-low.jpg" width="32%" alt="Sunset card scoring 14%: a flat grey sky, 'завтра, захід о 16:22'">
+</p>
+
+Every forecast arrives as a card like these: the score as a number and a gauge, the day and local time of the event, and a sky drawn for that score.
+
 ## Features
 
 - Telegram long polling, no public webhook required.
@@ -15,6 +23,92 @@ A self-hosted Telegram bot that predicts whether today's sunset is likely to be 
 - Button-driven settings with validated manual input.
 - Opt-in notifications before promising sunsets.
 - Privacy-conscious logs that avoid user data.
+- Sunrise forecasts on demand from the same pipeline.
+
+## How It Works
+
+### From button press to card
+
+The three day buttons (Сьогодні, Завтра, Світанок) all run one pipeline. The cache decides first; a provider is only asked when the cache has nothing it can serve.
+
+```mermaid
+flowchart LR
+    press(["Button press"]) --> verdict{"Cache verdict"}
+    verdict -- "Serve" --> render
+    verdict -- "RetryPreferred" --> retry["Ask Sunsethue again"]
+    retry -- "answers" --> store
+    retry -- "still unavailable" --> held["Serve the held<br/>Open-Meteo row"] --> render
+    verdict -- "Fetch" --> sunsethue["Sunsethue"]
+    sunsethue -- "answers" --> store["Save to<br/>forecast_cache"]
+    sunsethue -- "error, quota,<br/>or cooling down" --> openmeteo["Open-Meteo +<br/>local score"] --> store
+    store --> render["Render the card"]
+    render --> telegram(["Edit the message<br/>in place"])
+```
+
+### Which cached forecast is served
+
+The cache holds today's and tomorrow's row for each Solar Event (sunrise or sunset). The decision walks them soonest first:
+
+```mermaid
+flowchart TD
+    start(["Cached rows for this event,<br/>soonest first"]) --> any{"Any row left?"}
+    any -- "no" --> fetch(["Fetch"])
+    any -- "yes" --> past{"Event already passed?"}
+    past -- "yes" --> skip["Skip it"] --> any
+    past -- "no" --> provider{"From Sunsethue?"}
+    provider -- "yes" --> stale{"Fetched before Sunsethue's<br/>latest model update?<br/>04:30 · 10:30 · 16:30 · 22:30 UTC"}
+    stale -- "yes" --> skip
+    stale -- "no" --> serve(["Serve"])
+    provider -- "no, Open-Meteo" --> key{"Sunsethue key<br/>configured?"}
+    key -- "yes" --> retry(["RetryPreferred"])
+    key -- "no" --> serve
+```
+
+An Open-Meteo row is *provisional*: it is shown, but Sunsethue is asked again the next time it is needed, so a score can improve between two checks.
+
+### When Sunsethue keeps failing
+
+Sunsethue is skipped for a while after repeated failures instead of being asked on every press. A spent daily quota waits for the next UTC day, since it will not recover sooner.
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> Available
+    Available --> CoolingDown: 5 failures in a row
+    CoolingDown --> Probing: after 15 minutes
+    Probing --> Available: probe succeeds
+    Probing --> CoolingDown: probe fails
+    Available --> QuotaSpent: every API key out of quota
+    QuotaSpent --> Available: next UTC midnight
+```
+
+While Sunsethue is cooling down or out of quota, every forecast comes from Open-Meteo.
+
+## Reading the Card
+
+The sky behind the score is a function of the score, and it changes continuously: 44 and 45 look almost the same, while 15 and 85 look like different weather. Sunset runs from grey dusk to orange and violet; sunrise from grey dawn to pink and blue.
+
+<p align="center">
+  <img src=".github/readme/score-to-sky.png" alt="Two gradient strips, Sunset and Sunrise, with scores 0 to 100 along the bottom: low scores are grey, high sunset scores are orange and violet, high sunrise scores are pink and blue">
+</p>
+
+With a Sunsethue key, the score is Sunsethue's own quality forecast. Without one, or while it is unavailable, the bot scores Open-Meteo's hourly weather around the event itself. That local score is a weighted blend of five factors, after which hard caps can only lower it: a high chance of rain caps it at 30–50, and thick low cloud at 35–55.
+
+```mermaid
+pie showData
+    title Open-Meteo score weights
+    "Cloud composition" : 73
+    "Consistency across the window" : 12
+    "Clarity and air quality" : 9
+    "Open horizon" : 4
+    "Precipitation" : 2
+```
+
+Regenerate the card and strip images after changing the card's look:
+
+```bash
+python .github/readme/make_images.py
+```
 
 ## Run Locally
 
