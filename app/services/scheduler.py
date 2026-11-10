@@ -146,8 +146,53 @@ async def run_notification_scan(
             # the same sunset.
             await session.commit()
 
+        warmed = await warm_sunrises(users, session_factory, settings, weather_client, sunsethue_client)
+        if warmed:
+            logger.info("sunrise_warmed count=%s", warmed)
+
         deleted = await repo.delete_old_forecasts(settings.forecast_cache_retention_days)
         await session.commit()
         if deleted:
             logger.info("old_forecasts_deleted count=%s", deleted)
     return sent
+
+
+async def warm_sunrises(
+    users: list[User],
+    session_factory: async_sessionmaker,
+    settings: Settings,
+    weather_client: OpenMeteoClient,
+    sunsethue_client: SunsethueClient,
+) -> int:
+    """Put each subscriber's next sunrise in the cache before they ask for it.
+
+    Sunrise is never notified, so without this the first Світанок press after
+    each Sunsethue model update fetched it while the subscriber waited. A
+    cached row is served without a provider call, so most passes cost nothing:
+    a fetch happens at most once per model update per subscriber (5 credits).
+    Returns how many were fetched rather than already cached.
+
+    Each warm-up has its own session: a rollback expires every loaded object,
+    and one failed warm-up must not touch the notification pass or the rest.
+    """
+    warmed = 0
+    for user in users:
+        try:
+            async with session_factory() as session:
+                forecasts = ForecastService(
+                    session,
+                    settings,
+                    weather_client,
+                    sunsethue_client,
+                    repository=Repository(session),
+                )
+                await forecasts.today_for_user(user, SolarEvent.SUNRISE)
+                await session.commit()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("sunrise_warm_failed error=%s", type(exc).__name__)
+            continue
+        if forecasts.verdict != "Serve":
+            warmed += 1
+    return warmed
