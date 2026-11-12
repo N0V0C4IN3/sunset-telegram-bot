@@ -9,16 +9,15 @@ from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import (
-    BufferedInputFile,
     CallbackQuery,
     InlineKeyboardMarkup,
-    InputMediaPhoto,
     Message,
     ReplyKeyboardRemove,
 )
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from app.bot.card import CARD_FILENAME, render_forecast_card
+from app.bot.card import card_face
+from app.bot.card_photos import show_card
 from app.bot.tracing import CardPhases, card_phases
 from app.bot.keyboards import cancel_keyboard, location_keyboard, main_keyboard, settings_keyboard
 from app.bot.messages import format_forecast, location_saved_text, score_info_text, settings_text
@@ -181,36 +180,6 @@ async def send_or_edit(
                 return
             logger.info("message_edit_failed falling_back=send")
     await bot.send_message(chat_id, text, reply_markup=reply_markup)
-
-
-async def send_or_edit_card(
-    bot: Bot,
-    chat_id: int,
-    message_id: int | None,
-    image: bytes,
-    caption: str,
-    reply_markup: InlineKeyboardMarkup | None = None,
-) -> None:
-    """Show the score card, editing in place when we came from a callback.
-
-    editMessageMedia replaces a text message with media as well as swapping one
-    photo for another, so both /settings -> card and card -> card edit cleanly.
-    """
-    photo = BufferedInputFile(image, filename=CARD_FILENAME)
-    if message_id is not None:
-        try:
-            await bot.edit_message_media(
-                chat_id=chat_id,
-                message_id=message_id,
-                media=InputMediaPhoto(media=photo, caption=caption),
-                reply_markup=reply_markup,
-            )
-            return
-        except TelegramBadRequest as exc:
-            if "message is not modified" in str(exc):
-                return
-            logger.info("card_edit_failed falling_back=send")
-    await bot.send_photo(chat_id, photo, caption=caption, reply_markup=reply_markup)
 
 
 @router.message(Command("start"))
@@ -492,15 +461,14 @@ async def _send_card(
         show_next_day = offers_next_day(repo, user)
 
     caption = format_forecast(result, timezone, provisional=is_provisional(result, sunsethue_client()))
-    image = await render_forecast_card(result, timezone)
-    card.lap("render")
-    await send_or_edit_card(
+    await show_card(
         bot,
         chat_id,
         message_id,
-        image,
+        card_face(result, timezone),
         caption,
         main_keyboard(subscribed, show_next_day=show_next_day),
+        phases=card,
     )
     card.lap("telegram")
 

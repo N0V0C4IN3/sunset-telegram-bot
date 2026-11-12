@@ -218,7 +218,7 @@ def scan(monkeypatch):
         monkeypatch.setattr("app.services.scheduler.Repository", lambda _session: repo)
         monkeypatch.setattr("app.services.scheduler.ForecastService", FakeForecastService)
         monkeypatch.setattr(
-            "app.services.scheduler.render_forecast_card",
+            "app.bot.card_photos.render_face",
             lambda *args, **kwargs: _immediate(b""),
         )
         monkeypatch.setattr("app.services.scheduler.format_forecast", lambda *a, **k: "")

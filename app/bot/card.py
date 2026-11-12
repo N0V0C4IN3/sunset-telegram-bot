@@ -205,12 +205,30 @@ def render_card(score: int, day_label: str, event_time: str, event: SolarEvent) 
     return buffer.getvalue()
 
 
-async def render_forecast_card(result: ForecastResult, timezone: str) -> bytes:
-    """Render off the event loop: Pillow is CPU-bound and this runs on a Pi."""
-    return await asyncio.to_thread(
-        render_card,
-        result.score,
-        day_label(result, timezone),
-        local_event_time(result, timezone),
-        result.event,
+@dataclass(frozen=True)
+class CardFace:
+    """Everything drawn on a card: two equal faces render the same image.
+
+    That makes it the key for reusing a photo Telegram already holds
+    (`card_photos`), so it must name every input of `render_card` and nothing
+    else.
+    """
+
+    score: int
+    day: str
+    time: str
+    event: SolarEvent
+
+
+def card_face(result: ForecastResult, timezone: str) -> CardFace:
+    return CardFace(
+        score=max(0, min(100, result.score)),
+        day=day_label(result, timezone),
+        time=local_event_time(result, timezone),
+        event=result.event,
     )
+
+
+async def render_face(face: CardFace) -> bytes:
+    """Render off the event loop: Pillow is CPU-bound and this runs on a Pi."""
+    return await asyncio.to_thread(render_card, face.score, face.day, face.time, face.event)

@@ -4,10 +4,10 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot
-from aiogram.types import BufferedInputFile
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from app.bot.card import CARD_FILENAME, render_forecast_card
+from app.bot.card import card_face
+from app.bot.card_photos import show_card
 from app.bot.keyboards import main_keyboard
 from app.bot.messages import format_forecast
 from app.config import Settings
@@ -79,19 +79,15 @@ async def notify_subscriber(
         return False
 
     caption = format_forecast(forecast, user.timezone, provisional=provisional)
-    image = await render_forecast_card(forecast, user.timezone)
     # The same keyboard /today shows, so its buttons edit the notification in
     # place, and Завтра follows the same rule as everywhere else.
     keyboard = main_keyboard(
         user_settings.subscribed,
         show_next_day=next_day_available(repo.decrypt_location(user), local_now),
     )
-    await bot.send_photo(
-        user.id,
-        BufferedInputFile(image, filename=CARD_FILENAME),
-        caption=caption,
-        reply_markup=keyboard,
-    )
+    # Sent through the same photo cache as the buttons, so a press on this
+    # notification's Сьогодні finds the photo Telegram already holds.
+    await show_card(bot, user.id, None, card_face(forecast, user.timezone), caption, keyboard)
     await repo.mark_notified(user.id, local_now.date())
     return True
 
