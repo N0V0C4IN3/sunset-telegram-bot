@@ -28,6 +28,9 @@ class ForecastService:
         self.settings = settings
         self.weather_client = weather_client
         self.sunsethue_client = sunsethue_client
+        # How the last today_for_user was served (Serve/RetryPreferred/Fetch), for
+        # the card_timing log; None until a call reaches the cache decision.
+        self.verdict: str | None = None
 
     async def today_for_user(
         self,
@@ -49,7 +52,9 @@ class ForecastService:
             self.settings.forecast_cache_ttl_minutes,
         )
 
-        match verdict_for(candidates, local_now, event, self.sunsethue_client.is_configured, on_date):
+        verdict = verdict_for(candidates, local_now, event, self.sunsethue_client.is_configured, on_date)
+        self.verdict = type(verdict).__name__
+        match verdict:
             case Serve(cached):
                 return _from_cache(cached)
             case RetryPreferred(held):

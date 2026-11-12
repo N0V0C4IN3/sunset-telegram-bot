@@ -4,10 +4,10 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot
-from aiogram.types import BufferedInputFile
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from app.bot.card import render_forecast_card
+from app.bot.card import card_face
+from app.bot.card_photos import show_card
 from app.bot.keyboards import main_keyboard
 from app.bot.messages import format_forecast
 from app.config import Settings
@@ -79,19 +79,15 @@ async def notify_subscriber(
         return False
 
     caption = format_forecast(forecast, user.timezone, provisional=provisional)
-    png = await render_forecast_card(forecast, user.timezone)
     # The same keyboard /today shows, so its buttons edit the notification in
     # place, and Завтра follows the same rule as everywhere else.
     keyboard = main_keyboard(
         user_settings.subscribed,
         show_next_day=next_day_available(repo.decrypt_location(user), local_now),
     )
-    await bot.send_photo(
-        user.id,
-        BufferedInputFile(png, filename="sunset.png"),
-        caption=caption,
-        reply_markup=keyboard,
-    )
+    # Sent through the same photo cache as the buttons, so a press on this
+    # notification's Сьогодні finds the photo Telegram already holds.
+    await show_card(bot, user.id, None, card_face(forecast, user.timezone), caption, keyboard)
     await repo.mark_notified(user.id, local_now.date())
     return True
 
@@ -146,8 +142,53 @@ async def run_notification_scan(
             # the same sunset.
             await session.commit()
 
+        warmed = await warm_sunrises(users, session_factory, settings, weather_client, sunsethue_client)
+        if warmed:
+            logger.info("sunrise_warmed count=%s", warmed)
+
         deleted = await repo.delete_old_forecasts(settings.forecast_cache_retention_days)
         await session.commit()
         if deleted:
             logger.info("old_forecasts_deleted count=%s", deleted)
     return sent
+
+
+async def warm_sunrises(
+    users: list[User],
+    session_factory: async_sessionmaker,
+    settings: Settings,
+    weather_client: OpenMeteoClient,
+    sunsethue_client: SunsethueClient,
+) -> int:
+    """Put each subscriber's next sunrise in the cache before they ask for it.
+
+    Sunrise is never notified, so without this the first Світанок press after
+    each Sunsethue model update fetched it while the subscriber waited. A
+    cached row is served without a provider call, so most passes cost nothing:
+    a fetch happens at most once per model update per subscriber (5 credits).
+    Returns how many were fetched rather than already cached.
+
+    Each warm-up has its own session: a rollback expires every loaded object,
+    and one failed warm-up must not touch the notification pass or the rest.
+    """
+    warmed = 0
+    for user in users:
+        try:
+            async with session_factory() as session:
+                forecasts = ForecastService(
+                    session,
+                    settings,
+                    weather_client,
+                    sunsethue_client,
+                    repository=Repository(session),
+                )
+                await forecasts.today_for_user(user, SolarEvent.SUNRISE)
+                await session.commit()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("sunrise_warm_failed error=%s", type(exc).__name__)
+            continue
+        if forecasts.verdict != "Serve":
+            warmed += 1
+    return warmed

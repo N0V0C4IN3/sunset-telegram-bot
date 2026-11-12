@@ -197,22 +197,28 @@ async def test_a_provisional_score_below_threshold_leaves_the_day_open():
 def scan(monkeypatch):
     """Runs a scan over the given users with fakes swapped in for the real collaborators."""
 
-    def build(users, blocked_by=None, scores=None):
+    def build(users, blocked_by=None, scores=None, sunrise_fails_for=(), cached_sunrise_for=()):
         repo = FakeRepo(users)
         session = FakeSession(repo)
         bot = FakeBot(blocked_by)
+        bot.asked = []
 
         class FakeForecastService:
             def __init__(self, *args, **kwargs):
-                pass
+                self.verdict = None
 
             async def today_for_user(self, user, event, on_date=None):
+                bot.asked.append((user.id, event))
+                if event == SolarEvent.SUNRISE:
+                    if user.id in sunrise_fails_for:
+                        raise RuntimeError("Sunsethue down")
+                    self.verdict = "Serve" if user.id in cached_sunrise_for else "Fetch"
                 return forecast((scores or {}).get(user.id, 90))
 
         monkeypatch.setattr("app.services.scheduler.Repository", lambda _session: repo)
         monkeypatch.setattr("app.services.scheduler.ForecastService", FakeForecastService)
         monkeypatch.setattr(
-            "app.services.scheduler.render_forecast_card",
+            "app.bot.card_photos.render_face",
             lambda *args, **kwargs: _immediate(b""),
         )
         monkeypatch.setattr("app.services.scheduler.format_forecast", lambda *a, **k: "")
@@ -275,3 +281,43 @@ async def test_every_subscriber_is_committed_as_they_are_decided(scan):
 
     assert session.commits >= len(users), "each subscriber commits, not one commit at the end"
     assert session.rollbacks == 0
+
+
+# Sunrise warm-up: Світанок is never notified, so the scan caches it ahead.
+
+
+@pytest.mark.asyncio
+async def test_every_subscriber_has_their_sunrise_warmed(scan):
+    already_notified = FakeUser(2, settings=FakeUserSettings(last_notified_for_date=SUNSET.date()))
+    users = [FakeUser(1), already_notified]
+    bot, repo, session = scan(users)
+
+    await run_notification_scan(bot, lambda: session, FakeSettings(), None, FakeSunsethue())
+
+    warmed = [user_id for user_id, event in bot.asked if event == SolarEvent.SUNRISE]
+    assert warmed == [1, 2], "a subscriber already notified today still gets tomorrow's sunrise warmed"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_sunrise_warm_up_spares_notifications_and_the_rest(scan, caplog):
+    users = [FakeUser(1), FakeUser(2), FakeUser(3)]
+    bot, repo, session = scan(users, sunrise_fails_for={1})
+
+    with caplog.at_level("INFO", logger="app.services.scheduler"):
+        sent = await run_notification_scan(bot, lambda: session, FakeSettings(), None, FakeSunsethue())
+
+    assert sent == 3
+    assert [user_id for user_id, event in bot.asked if event == SolarEvent.SUNRISE] == [1, 2, 3]
+    assert "sunrise_warm_failed error=RuntimeError" in caplog.text
+    assert "sunrise_warmed count=2" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_an_already_cached_sunrise_is_not_counted_as_warmed(scan, caplog):
+    users = [FakeUser(1), FakeUser(2)]
+    bot, repo, session = scan(users, cached_sunrise_for={1, 2})
+
+    with caplog.at_level("INFO", logger="app.services.scheduler"):
+        await run_notification_scan(bot, lambda: session, FakeSettings(), None, FakeSunsethue())
+
+    assert "sunrise_warmed" not in caplog.text
