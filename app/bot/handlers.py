@@ -315,12 +315,19 @@ async def unsubscribe_callback(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "score_info")
 async def score_info_callback(callback: CallbackQuery) -> None:
     await answer_callback(callback)
-    subscribed, show_next_day = await keyboard_state(callback.from_user.id)
+    async with open_session() as session:
+        repo = Repository(session)
+        user = await repo.get_user_with_settings(callback.from_user.id)
+        if user is None or user.settings is None:
+            subscribed, show_next_day, timezone = False, False, None
+        else:
+            subscribed, show_next_day = user.settings.subscribed, offers_next_day(repo, user)
+            timezone = saved_timezone(user)
     await send_or_edit(
         callback.bot,
         callback.message.chat.id,
         callback.message.message_id,
-        score_info_text(),
+        score_info_text(timezone),
         # Reached from the settings view, so it keeps that keyboard to go back to.
         settings_keyboard(subscribed, show_next_day=show_next_day),
         replace=from_photo(callback),
@@ -520,8 +527,7 @@ async def show_settings(
         threshold = user.settings.threshold
         lead_time = user.settings.lead_time_minutes
         subscribed = user.settings.subscribed
-        has_location = user.latitude_encrypted is not None and user.longitude_encrypted is not None
-        timezone = user.timezone if has_location else None
+        timezone = saved_timezone(user)
         show_next_day = offers_next_day(repo, user)
         await session.commit()
 
@@ -550,6 +556,12 @@ async def set_pending(
     await send_or_edit(bot, chat_id, message_id, text, cancel_keyboard(), replace=replace)
 
 
+def saved_timezone(user: User) -> str | None:
+    """The user's zone, or None until a location is saved: the zone comes from it."""
+    has_location = user.latitude_encrypted is not None and user.longitude_encrypted is not None
+    return user.timezone if has_location else None
+
+
 def offers_next_day(repo: Repository, user: User) -> bool:
     """Whether this user's keyboard gets Завтра, wherever the keyboard appears.
 
@@ -560,13 +572,3 @@ def offers_next_day(repo: Repository, user: User) -> bool:
     if location is None:
         return False
     return next_day_available(location, datetime.now(ZoneInfo(user.timezone)))
-
-
-async def keyboard_state(user_id: int) -> tuple[bool, bool]:
-    """(subscribed, show_next_day) for a view that only needs the keyboard."""
-    async with open_session() as session:
-        repo = Repository(session)
-        user = await repo.get_user_with_settings(user_id)
-        if user is None or user.settings is None:
-            return False, False
-        return user.settings.subscribed, offers_next_day(repo, user)
