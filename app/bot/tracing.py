@@ -6,9 +6,11 @@ the stall does not reproduce outside the live bot. Two log lines locate it:
 - `telegram_call`, one per Telegram API call made through `TracedAiohttpSession`
   (except the long poll). Marks are ms from the start of the call: `dns` or
   `dns_cached`, `reused` or `connected`, `sent` (headers written), `uploaded`
-  (last body byte written, so an image upload shows here), then `replied` (the
-  response headers arrived; the body read that follows is not counted) or
-  `failed` with the error name.
+  (last body byte handed to the transport: it may still sit in socket buffers),
+  `acked` (the kernel saw everything written acknowledged; Linux only, see
+  `tcp_info`), then `replied` (the response headers arrived; the body read that
+  follows is not counted) or `failed` with the error name. On Linux the line
+  ends with `retrans` (segments retransmitted during the call) and `rtt` (ms).
 - `card_timing`, one per card request from `card_phases`, written even when the
   card fails or returns early: the cache verdict, then cumulative marks per stage.
 
@@ -22,13 +24,16 @@ import re
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from contextvars import ContextVar
 from types import SimpleNamespace
 
 from aiogram import __version__ as aiogram_version
 from aiogram.client.session.aiohttp import AiohttpSession
-from aiohttp import ClientSession, TraceConfig
+from aiohttp import ClientSession, TCPConnector, TraceConfig
 from aiohttp.hdrs import USER_AGENT
 from aiohttp.http import SERVER_SOFTWARE
+
+from app.bot.tcp_info import SendWatch
 
 logger = logging.getLogger(__name__)
 
@@ -57,12 +62,34 @@ def phases(marks: Marks) -> str:
     return " ".join(f"{name}={round(1000 * (at - start))}" for name, at in marks[1:])
 
 
-def summarize(method: str, marks: Marks, error: BaseException | None = None) -> str:
+def summarize(
+    method: str,
+    marks: Marks,
+    error: BaseException | None = None,
+    counters: dict[str, int] | None = None,
+) -> str:
     """The `telegram_call` line for one request."""
     line = f"telegram_call method={method} {phases(sorted(marks, key=lambda mark: mark[1]))}"
+    for name, value in (counters or {}).items():
+        line += f" {name}={value}"
     if error is not None:
         line += f" error={type(error).__name__}"
     return line
+
+
+# The transport of the request in flight. aiohttp gives trace callbacks no
+# connection, so `WatchedConnector` sets this in the requesting task, where the
+# headers-sent callback that follows can read it.
+_transport: ContextVar[object | None] = ContextVar("telegram_transport", default=None)
+
+
+class WatchedConnector(TCPConnector):
+    """aiogram's connector, publishing each request's transport to the tracer."""
+
+    async def connect(self, req, traces, timeout):
+        connection = await super().connect(req, traces, timeout)
+        _transport.set(connection.transport)
+        return connection
 
 
 def _trace_config() -> TraceConfig:
@@ -71,6 +98,13 @@ def _trace_config() -> TraceConfig:
     async def started(session, context: SimpleNamespace, params) -> None:
         context.marks = [("start", time.perf_counter())]
         context.uploaded = None
+        context.watch = None
+
+    async def headers_sent(session, context: SimpleNamespace, params) -> None:
+        context.marks.append(("sent", time.perf_counter()))
+        transport = _transport.get()
+        if transport is not None and method_name(params.url.path) not in UNTRACED_METHODS:
+            context.watch = SendWatch(transport)
 
     def mark(phase: str):
         async def record(session, context: SimpleNamespace, params) -> None:
@@ -83,14 +117,22 @@ def _trace_config() -> TraceConfig:
         context.uploaded = time.perf_counter()
 
     def log(context: SimpleNamespace, url, outcome: str, error: BaseException | None = None) -> None:
+        ended = time.perf_counter()
         method = method_name(url.path)
         if method in UNTRACED_METHODS:
             return
         marks = list(context.marks)
         if context.uploaded is not None:
             marks.append(("uploaded", context.uploaded))
-        marks.append((outcome, time.perf_counter()))
-        logger.info(summarize(method, marks, error))
+        counters: dict[str, int] = {}
+        if context.watch is not None:
+            sent = next(at for name, at in marks if name == "sent")
+            written = context.uploaded if context.uploaded is not None else sent
+            acked, counters = context.watch.finish(written, ended)
+            if acked is not None:
+                marks.append(("acked", acked))
+        marks.append((outcome, ended))
+        logger.info(summarize(method, marks, error, counters))
 
     async def replied(session, context: SimpleNamespace, params) -> None:
         log(context, params.url, "replied")
@@ -104,7 +146,7 @@ def _trace_config() -> TraceConfig:
     config.on_connection_queued_end.append(mark("queued"))
     config.on_connection_reuseconn.append(mark("reused"))
     config.on_connection_create_end.append(mark("connected"))
-    config.on_request_headers_sent.append(mark("sent"))
+    config.on_request_headers_sent.append(headers_sent)
     config.on_request_chunk_sent.append(chunk_sent)
     config.on_request_end.append(replied)
     config.on_request_exception.append(failed)
@@ -116,8 +158,14 @@ class TracedAiohttpSession(AiohttpSession):
 
     Mirrors `AiohttpSession.create_session`, whose ClientSession offers no hook
     for trace configs. `test_tracing.py` checks the two still build the same
-    session, so an aiogram upgrade that changes it fails the suite.
+    session, so an aiogram upgrade that changes it fails the suite. The one
+    deliberate difference is `WatchedConnector`, a subclass of aiogram's own.
     """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        if self._connector_type is TCPConnector:
+            self._connector_type = WatchedConnector
 
     async def create_session(self) -> ClientSession:
         if self._should_reset_connector:

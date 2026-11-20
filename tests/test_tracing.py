@@ -1,11 +1,12 @@
 import logging
+import socket
 
 import pytest
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from app.bot.tracing import TracedAiohttpSession, card_phases, method_name, summarize
+from app.bot.tracing import TracedAiohttpSession, WatchedConnector, card_phases, method_name, summarize
 
 TOKEN = "123456:SECRET-token-value"
 
@@ -26,6 +27,14 @@ def test_summary_lists_phases_in_time_order_from_the_start():
     marks = [("start", 10.0), ("sent", 10.002), ("reused", 10.001), ("replied", 12.5)]
 
     assert summarize("sendPhoto", marks) == "telegram_call method=sendPhoto reused=1 sent=2 replied=2500"
+
+
+def test_summary_puts_counters_after_the_phases():
+    marks = [("start", 0.0), ("acked", 0.3), ("replied", 9.0)]
+
+    line = summarize("editMessageMedia", marks, counters={"retrans": 2, "rtt": 41})
+
+    assert line == "telegram_call method=editMessageMedia acked=300 replied=9000 retrans=2 rtt=41"
 
 
 def test_summary_names_the_error():
@@ -71,6 +80,17 @@ async def test_a_real_request_is_logged_by_phase_without_the_token(caplog):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(not hasattr(socket, "TCP_INFO"), reason="TCP_INFO is Linux only")
+async def test_a_real_upload_is_seen_acknowledged_before_the_reply(caplog):
+    (line,) = await _traced_requests(caplog, "editMessageMedia")
+
+    fields = dict(field.split("=") for field in line.split()[1:])
+    assert int(fields["uploaded"]) <= int(fields["acked"]) <= int(fields["replied"])
+    assert fields["retrans"] == "0"
+    assert "rtt" in fields
+
+
+@pytest.mark.asyncio
 async def test_the_long_poll_is_not_logged(caplog):
     assert await _traced_requests(caplog, "getUpdates") == []
 
@@ -88,7 +108,9 @@ class _RecordedSession:
 def _construction(session: _RecordedSession) -> dict:
     kwargs = dict(session.kwargs)
     kwargs.pop("trace_configs", None)
-    kwargs["connector"] = type(kwargs["connector"])
+    connector = type(kwargs["connector"])
+    # Ours is aiogram's own connector, subclassed only to watch the socket.
+    kwargs["connector"] = connector.__base__ if connector is WatchedConnector else connector
     return {"args": session.args, **kwargs}
 
 
@@ -106,6 +128,7 @@ async def test_the_traced_session_is_built_like_aiograms_own(monkeypatch):
     try:
         assert _construction(ours) == _construction(theirs)
         assert len(ours.kwargs["trace_configs"]) == 1
+        assert type(ours.kwargs["connector"]) is WatchedConnector
     finally:
         for session in (ours, theirs):
             await session.kwargs["connector"].close()
