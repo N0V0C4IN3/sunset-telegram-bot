@@ -1,25 +1,18 @@
 """The rules for serving a stored forecast, as a single decision.
 
-`ForecastService` owns the I/O; this module owns the judgement. Keeping them
-apart is what makes the whole decision — not just its leaves — reachable from a
-test without a session.
+`ForecastService` owns the I/O; this module owns the judgement, freshness
+included. Keeping them apart is what makes the whole decision — not just its
+leaves — reachable from a test without a session.
 """
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from app.db.models import ForecastCache
 from app.services.solar import SolarEvent
 from app.services.sunsethue import PROVIDER_SUNSETHUE
-
-SUNSETHUE_MODEL_AVAILABLE_AT_UTC = (
-    time(4, 30, tzinfo=UTC),
-    time(10, 30, tzinfo=UTC),
-    time(16, 30, tzinfo=UTC),
-    time(22, 30, tzinfo=UTC),
-)
 
 
 @dataclass(frozen=True)
@@ -41,11 +34,27 @@ class RetryPreferred:
 
 
 @dataclass(frozen=True)
+class Recheck:
+    """Sunsethue expected a newer run than `held` comes from by now.
+
+    Ask which run is latest: serve `held` while it still is, otherwise treat it
+    like a provisional row. Runs are often late, and re-asking for each forecast
+    before the new run lands would spend five credits for the same answer.
+    """
+
+    held: ForecastCache
+
+    def held_is_latest(self, latest_run: datetime | None) -> bool:
+        """True when the latest run is known and `held` already comes from it."""
+        return latest_run is not None and latest_run <= as_utc(self.held.run_at)
+
+
+@dataclass(frozen=True)
 class Fetch:
     """Nothing servable is stored: ask a provider."""
 
 
-CacheVerdict = Serve | RetryPreferred | Fetch
+CacheVerdict = Serve | RetryPreferred | Recheck | Fetch
 
 
 def verdict_for(
@@ -53,14 +62,19 @@ def verdict_for(
     local_now: datetime,
     event: SolarEvent,
     preferred_available: bool,
+    ttl: timedelta,
     on_date: date | None = None,
 ) -> CacheVerdict:
     """Decide what to do with the rows held for a user.
 
-    `candidates` are the stored forecasts that already passed the TTL, ordered
-    soonest sunset first. `local_now` carries the user's timezone. `on_date`
-    narrows the question to one day; without it the next upcoming `event` wins.
-    A row for the other kind of Solar Event is never an answer, even on the same day.
+    `candidates` are the stored forecasts for the days in question, soonest
+    first. `local_now` carries the user's timezone. `on_date` narrows the
+    question to one day; without it the next upcoming `event` wins. A row for
+    the other kind of Solar Event is never an answer, even on the same day.
+
+    A Sunsethue row that names its run is fresh until Sunsethue expects the
+    next one, and until the event when it expects none. Every other row is
+    fresh for `ttl` after it was fetched.
     """
     timezone = local_now.tzinfo
     for cached in candidates:
@@ -70,14 +84,17 @@ def verdict_for(
             continue
         if not _event_is_upcoming(cached, timezone, local_now):
             continue
-        if cached.provider == PROVIDER_SUNSETHUE:
-            if _sunsethue_cache_is_current(cached, local_now):
+        if cached.provider == PROVIDER_SUNSETHUE and cached.run_at is not None:
+            if cached.next_update_at is None or local_now < as_utc(cached.next_update_at):
                 return Serve(cached)
+            return Recheck(cached)
+        if as_utc(cached.fetched_at) < local_now - ttl:
             continue
-        if preferred_available:
-            return RetryPreferred(cached)
-        # Nobody better to ask, so the provisional row is all there is.
-        return Serve(cached)
+        if cached.provider == PROVIDER_SUNSETHUE or not preferred_available:
+            # A Sunsethue row that names no run, or a provisional row with
+            # nobody better to ask: either way, it is all there is.
+            return Serve(cached)
+        return RetryPreferred(cached)
     return Fetch()
 
 
@@ -91,25 +108,8 @@ def _event_is_upcoming(cache: ForecastCache, timezone: ZoneInfo, local_now: date
     return _as_local_time(cache.event_at, timezone) > local_now
 
 
-def _sunsethue_cache_is_current(cache: ForecastCache, local_now: datetime) -> bool:
-    """True while no Sunsethue model update has landed since this row was fetched."""
-    fetched_at = cache.fetched_at
-    if fetched_at.tzinfo is None:
-        fetched_at = fetched_at.replace(tzinfo=UTC)
-    fetched_at_utc = fetched_at.astimezone(UTC)
-    now_utc = local_now.astimezone(UTC)
-    latest_model_update = _latest_sunsethue_model_update(now_utc)
-    return latest_model_update is None or fetched_at_utc >= latest_model_update
-
-
-def _latest_sunsethue_model_update(now_utc: datetime) -> datetime | None:
-    today_updates = [
-        datetime.combine(now_utc.date(), update_time)
-        for update_time in SUNSETHUE_MODEL_AVAILABLE_AT_UTC
-        if datetime.combine(now_utc.date(), update_time) <= now_utc
-    ]
-    if today_updates:
-        return max(today_updates)
-
-    yesterday = now_utc.date() - timedelta(days=1)
-    return datetime.combine(yesterday, SUNSETHUE_MODEL_AVAILABLE_AT_UTC[-1])
+def as_utc(value: datetime) -> datetime:
+    """Stored timestamps are UTC; a naive one is read as such."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)

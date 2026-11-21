@@ -30,6 +30,11 @@ class ForecastResult:
     score: int
     description: str
     weather_data: dict
+    # Sunsethue only: the run the forecast comes from, and when the provider
+    # expects a newer one. None from Open-Meteo, and `next_update_at` is also
+    # None once Sunsethue expects no further update for the event.
+    run_at: datetime | None = None
+    next_update_at: datetime | None = None
 
 
 class OpenMeteoClient:

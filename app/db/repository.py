@@ -86,20 +86,17 @@ class Repository:
         self,
         user_id: int,
         forecast_dates: Sequence[date],
-        ttl_minutes: int,
     ) -> list[ForecastCache]:
-        """Rows of either Solar Event still inside the TTL for any of `forecast_dates`.
+        """Rows of either Solar Event for any of `forecast_dates`, soonest first.
 
-        Soonest first. Telling sunrise from sunset is the Cache Verdict's job, where
-        it is a pure, tested rule rather than a clause in a query.
+        Whether one is fresh, and which Solar Event it answers for, is the Cache
+        Verdict's job, where it is a pure, tested rule rather than a clause in a query.
         """
-        cutoff = datetime.now(UTC) - timedelta(minutes=ttl_minutes)
         result = await self.session.execute(
             select(ForecastCache)
             .where(
                 ForecastCache.user_id == user_id,
                 ForecastCache.forecast_date.in_(forecast_dates),
-                ForecastCache.fetched_at >= cutoff,
             )
             .order_by(ForecastCache.forecast_date)
         )
@@ -115,6 +112,8 @@ class Repository:
         score: int,
         description: str,
         weather_data: dict,
+        run_at: datetime | None = None,
+        next_update_at: datetime | None = None,
     ) -> None:
         statement = insert(ForecastCache).values(
             user_id=user_id,
@@ -126,6 +125,8 @@ class Repository:
             score=score,
             description=description,
             weather_data=weather_data,
+            run_at=run_at,
+            next_update_at=next_update_at,
         )
         update_values = {
             "provider": statement.excluded.provider,
@@ -134,6 +135,8 @@ class Repository:
             "score": statement.excluded.score,
             "description": statement.excluded.description,
             "weather_data": statement.excluded.weather_data,
+            "run_at": statement.excluded.run_at,
+            "next_update_at": statement.excluded.next_update_at,
         }
         await self.session.execute(
             statement.on_conflict_do_update(

@@ -82,10 +82,16 @@ def test_a_naive_sunset_is_read_as_local():
 # The card.
 
 
-def test_the_card_is_a_png_of_the_expected_size():
+def test_the_card_is_a_jpeg_of_the_expected_size():
     image = Image.open(io.BytesIO(render_card(72, "сьогодні", "20:14", SolarEvent.SUNSET)))
-    assert image.format == "PNG"
+    assert image.format == "JPEG"
     assert image.size == (WIDTH, HEIGHT)
+
+
+def test_the_card_stays_small_enough_to_upload_quickly():
+    # The richest sky is the largest file; as a PNG it was ~150 KiB.
+    for event in (SolarEvent.SUNSET, SolarEvent.SUNRISE):
+        assert len(render_card(100, "сьогодні", "20:14", event)) < 60 * 1024
 
 
 def test_the_card_renders_at_both_extremes():

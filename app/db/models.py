@@ -55,3 +55,7 @@ class ForecastCache(Base):
     score: Mapped[int] = mapped_column(Integer, nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
     weather_data: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    # Sunsethue's `run` and `next_expected_update`; see ForecastResult. A Sunsethue
+    # row without `run_at` is held for the cache TTL like any other.
+    run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_update_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

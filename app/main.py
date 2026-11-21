@@ -4,6 +4,7 @@ import logging
 from aiogram import Bot, Dispatcher
 
 from app.bot.handlers import setup_router
+from app.bot.tracing import TracedAiohttpSession
 from app.config import get_settings
 from app.db.session import create_session_factory
 from app.logging_config import configure_logging
@@ -28,7 +29,7 @@ async def main() -> None:
         settings.sunsethue_api_key,
         settings.sunsethue_fallback_api_key,
     )
-    bot = Bot(token=settings.telegram_bot_token)
+    bot = Bot(token=settings.telegram_bot_token, session=TracedAiohttpSession())
     dispatcher = Dispatcher()
     dispatcher.include_router(setup_router(session_factory, settings, weather_client, sunsethue_client))
 

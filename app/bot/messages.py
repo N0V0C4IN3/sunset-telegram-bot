@@ -1,7 +1,8 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 from app.services.solar import SolarEvent
+from app.services.sunsethue import run_times
 from app.services.weather import ForecastResult
 
 HEADLINE = {SolarEvent.SUNSET: "🌅 Захід сонця", SolarEvent.SUNRISE: "🌄 Схід сонця"}
@@ -84,22 +85,44 @@ def settings_text(
     )
 
 
-def score_info_text() -> str:
+def model_update_times(timezone: str | None, now: datetime) -> list[str]:
+    """HH:MM of the day's Sunsethue model updates, in clock order.
+
+    The schedule in force at `now`, in the user's zone when one is saved, else
+    UTC. Converted on today's date, so a daylight-saving change moves them the
+    way the user's clock moves.
+    """
+    tz = ZoneInfo(timezone) if timezone else UTC
+    today = now.astimezone(UTC).date()
+    local = (datetime.combine(today, at).astimezone(tz) for at in run_times(now))
+    return sorted(moment.strftime("%H:%M") for moment in local)
+
+
+def model_updates_text(timezone: str | None, now: datetime) -> str:
+    """When a Sunsethue score can change, so a moved score is not a surprise."""
+    times = model_update_times(timezone, now)
+    listed = f"{', '.join(times[:-1])} і {times[-1]}"
+    if timezone:
+        when = f"за вашим часом ({timezone}) — приблизно о {listed}"
+    else:
+        when = f"приблизно о {listed} за UTC (збережіть локацію, і тут буде ваш місцевий час)"
     return (
-        "ℹ️ Як рахується прогноз заходу сонця\n\n"
-        "Якщо налаштовано ключ Sunsethue, бот спершу бере прогноз Sunsethue: якість заходу у відсотках, час заходу, хмарність, напрямок сонця і золоту годину. Результат кешується, але оновлюється після наступного очікуваного оновлення моделі Sunsethue.\n\n"
-        "Якщо Sunsethue недоступний, не має модельних даних для локації або ключ не налаштовано, бот автоматично переходить на Open-Meteo і рахує прогноз локально.\n\n"
-        "Коли Open-Meteo підмінив Sunsethue через збій, така оцінка вважається тимчасовою. При наступному запиті бот знову спробує Sunsethue: якщо той уже ожив, ви побачите його прогноз, якщо ні — збережену оцінку Open-Meteo. Тому бал може змінитися між двома натисканнями, і це не тому, що бот передумав.\n\n"
-        "Якщо Sunsethue мовчить багато разів поспіль, бот ненадовго перестає його смикати, щоб не змушувати вас чекати даремно. А якщо вичерпано денний ліміт запитів, чекає вже до наступної доби.\n\n"
-        "Локальний розрахунок Open-Meteo дивиться не одну годину, а вікно навколо заходу сонця: приблизно дві години до заходу і одну годину після. Найбільшу вагу має час безпосередньо перед заходом.\n\n"
-        "Кнопка «Світанок» показує найближчий схід сонця: до світанку — сьогоднішній, після нього — завтрашній. Він оцінюється так само, за тією ж шкалою, а в розрахунку Open-Meteo вікно віддзеркалене: приблизно година до сходу і дві години після. Сповіщень про світанок бот не надсилає — лише про захід.\n\n"
-        "Якщо сьогоднішній захід уже минув, бот автоматично показує прогноз на наступний день і додає дату в повідомлення. Поки сьогоднішній захід ще попереду, кнопка «Завтра» показує наступний день; після заходу вона зникає, бо «Сьогодні» вже показує саме його.\n\n"
-        "Open-Meteo оцінка складається з п'яти частин:\n"
-        "• 30% — баланс хмар: високі й середні хмари можуть дати колір\n"
-        "• 25% — відкритість горизонту: багато низьких хмар сильно шкодить\n"
-        "• 20% — ризик дощу або опадів\n"
-        "• 15% — прозорість атмосфери: видимість, вологість, PM2.5, PM10, пил та аерозолі\n"
-        "• 10% — стабільність прогнозу у вікні заходу\n\n"
-        "Є також жорсткі обмеження: сильний дощ, дуже низька хмарність, погана видимість або брудне повітря можуть обмежити максимальний відсоток, навіть якщо інші фактори гарні.\n\n"
-        "Це все ще прогноз, не контракт із небом. Небо іноді читає документацію вибірково."
+        f"Модель Sunsethue оновлюється чотири рази на добу, {when}. "
+        "Між оновленнями прогноз Sunsethue не змінюється: бот показує збережений."
+    )
+
+
+def score_info_text(timezone: str | None = None, now: datetime | None = None) -> str:
+    """What a user needs to read a score: where it comes from and when it can change.
+
+    Deliberately Sunsethue only. A provisional Open-Meteo card explains itself
+    in its own caption (`format_forecast`), so the fallback is not described here.
+    """
+    now = now or datetime.now(UTC)
+    return (
+        "ℹ️ Як рахується прогноз\n\n"
+        "Прогноз дає Sunsethue: якість заходу чи світанку у відсотках і точний час події з урахуванням хмар, напрямку сонця та золотої години.\n\n"
+        f"{model_updates_text(timezone, now)}\n\n"
+        "Поки сьогоднішній захід попереду, «Завтра» показує наступний день; після заходу «Сьогодні» вже показує завтрашній. "
+        "«Світанок» показує найближчий схід сонця. Сповіщення бот надсилає лише про захід."
     )
