@@ -205,14 +205,14 @@ def scan(monkeypatch):
 
         class FakeForecastService:
             def __init__(self, *args, **kwargs):
-                self.verdict = None
+                self.asked_provider = False
 
             async def today_for_user(self, user, event, on_date=None):
                 bot.asked.append((user.id, event))
                 if event == SolarEvent.SUNRISE:
                     if user.id in sunrise_fails_for:
                         raise RuntimeError("Sunsethue down")
-                    self.verdict = "Serve" if user.id in cached_sunrise_for else "Fetch"
+                    self.asked_provider = user.id not in cached_sunrise_for
                 return forecast((scores or {}).get(user.id, 90))
 
         monkeypatch.setattr("app.services.scheduler.Repository", lambda _session: repo)

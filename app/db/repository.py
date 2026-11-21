@@ -1,7 +1,7 @@
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 
-from sqlalchemy import delete, or_, select
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -86,22 +86,17 @@ class Repository:
         self,
         user_id: int,
         forecast_dates: Sequence[date],
-        ttl_minutes: int,
     ) -> list[ForecastCache]:
-        """Rows of either Solar Event still inside the TTL for any of `forecast_dates`.
+        """Rows of either Solar Event for any of `forecast_dates`, soonest first.
 
-        Soonest first. Telling sunrise from sunset is the Cache Verdict's job, where
-        it is a pure, tested rule rather than a clause in a query. A row that names
-        its Sunsethue run is exempt from the TTL: the verdict judges it by when the
-        next run is expected, which a fixed TTL would only cut short.
+        Whether one is fresh, and which Solar Event it answers for, is the Cache
+        Verdict's job, where it is a pure, tested rule rather than a clause in a query.
         """
-        cutoff = datetime.now(UTC) - timedelta(minutes=ttl_minutes)
         result = await self.session.execute(
             select(ForecastCache)
             .where(
                 ForecastCache.user_id == user_id,
                 ForecastCache.forecast_date.in_(forecast_dates),
-                or_(ForecastCache.fetched_at >= cutoff, ForecastCache.run_at.is_not(None)),
             )
             .order_by(ForecastCache.forecast_date)
         )

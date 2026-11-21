@@ -133,6 +133,38 @@ async def test_run_info_without_a_key_asks_nobody(monkeypatch):
     assert calls == []
 
 
+@pytest.mark.asyncio
+async def test_a_forecast_from_an_older_run_than_run_info_claims_is_what_latest_run_reports(monkeypatch):
+    # /run-info named 12z before /event served it: without this, every recheck
+    # would see a newer run, re-ask, and get 06z back at five credits a time.
+    client = SunsethueClient("key")
+    client._run_info = _RunInfo(RUN_12Z, recheck_at=datetime.now(UTC) + timedelta(hours=5))
+
+    async def forecast(*args):
+        return SimpleNamespace(run_at=RUN_06Z)
+
+    monkeypatch.setattr(client, "_forecast_for_today", forecast)
+    await client.forecast_for_today(50.45, 30.52, "Europe/Kyiv", SolarEvent.SUNSET)
+
+    assert await client.latest_run() == RUN_06Z
+    assert client._run_info.recheck_at <= datetime.now(UTC) + RUN_INFO_RECHECK
+
+
+@pytest.mark.asyncio
+async def test_a_forecast_from_the_run_run_info_names_leaves_it_alone(monkeypatch):
+    held = _RunInfo(RUN_12Z, recheck_at=datetime.now(UTC) + timedelta(hours=5))
+    client = SunsethueClient("key")
+    client._run_info = held
+
+    async def forecast(*args):
+        return SimpleNamespace(run_at=RUN_12Z)
+
+    monkeypatch.setattr(client, "_forecast_for_today", forecast)
+    await client.forecast_for_today(50.45, 30.52, "Europe/Kyiv", SolarEvent.SUNSET)
+
+    assert client._run_info is held
+
+
 # Executing a Recheck verdict.
 
 
@@ -143,7 +175,7 @@ class _Repo:
     def decrypt_location(self, user):
         return (50.45, 30.52)
 
-    async def get_cached_forecasts(self, user_id, forecast_dates, ttl_minutes):
+    async def get_cached_forecasts(self, user_id, forecast_dates):
         return self.rows
 
     async def upsert_forecast(self, **row):
@@ -204,7 +236,7 @@ def _fresh_answer() -> ForecastResult:
     )
 
 
-async def _today(repo: _Repo, sunsethue: _Sunsethue) -> ForecastResult:
+async def _today(repo: _Repo, sunsethue: _Sunsethue) -> tuple[ForecastResult, ForecastService]:
     service = ForecastService(
         session=None,
         settings=SimpleNamespace(forecast_cache_ttl_minutes=300),
@@ -214,28 +246,30 @@ async def _today(repo: _Repo, sunsethue: _Sunsethue) -> ForecastResult:
     )
     result = await service.today_for_user(SimpleNamespace(id=1, timezone="Europe/Kyiv"), SolarEvent.SUNSET)
     assert service.verdict == "Recheck"
-    return result
+    return result, service
 
 
 @pytest.mark.asyncio
 async def test_a_late_run_keeps_the_held_forecast_without_spending_a_forecast():
     repo, sunsethue = _Repo([_held_row()]), _Sunsethue(latest=RUN_06Z, answer=_fresh_answer())
 
-    result = await _today(repo, sunsethue)
+    result, service = await _today(repo, sunsethue)
 
     assert result.description == "held"
     assert sunsethue.forecasts_asked == 0
     assert repo.stored == []
+    assert not service.asked_provider
 
 
 @pytest.mark.asyncio
 async def test_a_newer_run_is_fetched_and_stored_with_its_run():
     repo, sunsethue = _Repo([_held_row()]), _Sunsethue(latest=RUN_12Z, answer=_fresh_answer())
 
-    result = await _today(repo, sunsethue)
+    result, service = await _today(repo, sunsethue)
 
     assert result.description == "fresh"
     assert sunsethue.forecasts_asked == 1
+    assert service.asked_provider
     (stored,) = repo.stored
     assert stored["run_at"] == RUN_12Z and stored["next_update_at"] == result.next_update_at
 
@@ -244,14 +278,15 @@ async def test_a_newer_run_is_fetched_and_stored_with_its_run():
 async def test_when_run_info_cannot_say_sunsethue_is_asked_directly():
     repo, sunsethue = _Repo([_held_row()]), _Sunsethue(latest=None, answer=_fresh_answer())
 
-    assert (await _today(repo, sunsethue)).description == "fresh"
+    result, _ = await _today(repo, sunsethue)
+    assert result.description == "fresh"
 
 
 @pytest.mark.asyncio
 async def test_if_sunsethue_declines_the_held_forecast_beats_open_meteo():
     repo, sunsethue = _Repo([_held_row()]), _Sunsethue(latest=RUN_12Z, answer=None)
 
-    result = await _today(repo, sunsethue)
+    result, _ = await _today(repo, sunsethue)
 
     assert result.description == "held"
     assert repo.stored == []

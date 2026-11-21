@@ -76,8 +76,8 @@ async def show_card(
 ) -> None:
     """Edit `message_id` into the card, or send it when there is none.
 
-    A held file_id is tried first; if Telegram rejects it, it is forgotten and
-    the card is rendered and uploaded as if it had never been seen.
+    A held file_id is tried first; if Telegram rejects the photo itself, it is
+    forgotten and the card is rendered and uploaded as if it had never been seen.
     """
     file_id = cards.get(face)
     if file_id is not None:
@@ -85,7 +85,10 @@ async def show_card(
             await _put_photo(bot, chat_id, message_id, file_id, caption, reply_markup)
             _note(phases, photo="reused")
             return
-        except TelegramBadRequest:
+        except TelegramBadRequest as exc:
+            if not _rejects_the_photo(exc):
+                # About the chat, not the photo: an upload would fail the same way.
+                raise
             cards.forget(face)
             logger.info("card_file_id_rejected falling_back=upload")
 
@@ -125,6 +128,13 @@ async def _put_photo(
                 return None
             logger.info("card_edit_failed falling_back=send")
     return await bot.send_photo(chat_id, photo, caption=caption, reply_markup=reply_markup)
+
+
+def _rejects_the_photo(exc: TelegramBadRequest) -> bool:
+    """Telegram refused the file_id itself ("wrong file identifier", "FILE_REFERENCE_EXPIRED",
+    "MEDIA_EMPTY"), rather than the chat or the message it was sent to."""
+    description = str(exc).lower()
+    return "file" in description or "media" in description
 
 
 def _note(phases: CardPhases | None, **fields: object) -> None:

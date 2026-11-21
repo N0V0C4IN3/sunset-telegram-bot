@@ -189,6 +189,6 @@ async def warm_sunrises(
         except Exception as exc:
             logger.warning("sunrise_warm_failed error=%s", type(exc).__name__)
             continue
-        if forecasts.verdict != "Serve":
+        if forecasts.asked_provider:
             warmed += 1
     return warmed

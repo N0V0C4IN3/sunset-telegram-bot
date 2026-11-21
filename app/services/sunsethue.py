@@ -22,10 +22,10 @@ BREAKER_COOLDOWN = timedelta(minutes=15)
 # next run is due, and re-asked this often while that run is overdue.
 RUN_INFO_RECHECK = timedelta(minutes=10)
 
-# When each day's four runs are published (UTC). Every response now names its
-# run and when the next is expected, and the cache goes by those; the schedule
-# only judges rows stored before that, and tells users when scores can change.
-# Sunsethue moved every run 30 minutes later from the 12z run of 25 Nov 2026.
+# When each day's four runs are published (UTC), only to tell users when scores
+# can change: the cache goes by the run each response names instead. Sunsethue
+# moved every run 30 minutes later from the 12z run of 25 Nov 2026; once that
+# day is past, RUN_TIMES_BEFORE_CHANGE and the switch can be deleted.
 RUN_SCHEDULE_CHANGED_AT = datetime(2026, 11, 25, 12, 0, tzinfo=UTC)
 RUN_TIMES_BEFORE_CHANGE = (
     time(4, 30, tzinfo=UTC),
@@ -44,19 +44,6 @@ RUN_TIMES = (
 def run_times(at: datetime) -> tuple[time, ...]:
     """The publication times in force at `at`."""
     return RUN_TIMES if at >= RUN_SCHEDULE_CHANGED_AT else RUN_TIMES_BEFORE_CHANGE
-
-
-def latest_scheduled_run(now: datetime) -> datetime:
-    """The last scheduled publication at or before `now`, across the schedule change."""
-    now_utc = now.astimezone(UTC)
-    days = (now_utc.date() - timedelta(days=1), now_utc.date())
-    published = [
-        moment
-        for day in days
-        for at in (*RUN_TIMES_BEFORE_CHANGE, *RUN_TIMES)
-        if (moment := datetime.combine(day, at)) <= now_utc and at in run_times(moment)
-    ]
-    return max(published)
 
 
 class SunsethueError(WeatherError):
@@ -139,7 +126,22 @@ class SunsethueClient:
             self._breaker.record_failure(datetime.now(UTC))
             raise
         self._breaker.record_success()
+        self._hold_served_run(result.run_at)
         return result
+
+    def _hold_served_run(self, served_run: datetime | None) -> None:
+        """Never claim a newer run than /event actually serves.
+
+        /run-info can name a run before /event serves it. Left alone, every
+        recheck in that gap would see a newer run, re-ask, get the old one back,
+        and spend five credits each time. Holding the served run for
+        RUN_INFO_RECHECK costs one /run-info credit per recheck instead.
+        """
+        held = self._run_info
+        if served_run is None or held is None or served_run >= held.last_run:
+            return
+        recheck_at = min(held.recheck_at, datetime.now(UTC) + RUN_INFO_RECHECK)
+        self._run_info = _RunInfo(served_run, recheck_at)
 
     async def latest_run(self) -> datetime | None:
         """The run Sunsethue's newest data comes from, or None when it cannot say.

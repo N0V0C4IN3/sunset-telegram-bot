@@ -153,6 +153,20 @@ async def test_a_file_id_telegram_rejects_is_forgotten_and_the_card_uploaded(ren
 
 
 @pytest.mark.asyncio
+async def test_a_chat_that_refuses_the_card_keeps_the_photo_and_skips_the_upload(renders):
+    cards = UploadedCards()
+    cards.remember(face(), a_photo_message("held"))
+    bot = FakeBot(send_errors=["Bad Request: chat not found"])
+
+    with pytest.raises(TelegramBadRequest):
+        await show_card(bot, 1, None, face(), "caption", cards=cards)
+
+    assert bot.calls == [("send", "held")]
+    assert renders == [], "an upload would be refused by the same chat"
+    assert cards.get(face()) == "held"
+
+
+@pytest.mark.asyncio
 async def test_a_message_that_cannot_be_edited_still_gets_the_held_photo(renders):
     cards = UploadedCards()
     cards.remember(face(), a_photo_message("held"))

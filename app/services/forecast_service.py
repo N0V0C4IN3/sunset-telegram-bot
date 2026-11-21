@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings
 from app.db.models import ForecastCache, User
 from app.db.repository import Repository
-from app.services.cache_verdict import Fetch, Recheck, RetryPreferred, Serve, as_utc, verdict_for
+from app.services.cache_verdict import Fetch, Recheck, RetryPreferred, Serve, verdict_for
 from app.services.solar import SolarEvent, event_time
 from app.services.sunsethue import PROVIDER_SUNSETHUE, SunsethueClient, SunsethueError
 from app.services.weather import ForecastResult, OpenMeteoClient
@@ -28,9 +28,12 @@ class ForecastService:
         self.settings = settings
         self.weather_client = weather_client
         self.sunsethue_client = sunsethue_client
-        # How the last today_for_user was served (Serve/RetryPreferred/Fetch), for
-        # the card_timing log; None until a call reaches the cache decision.
+        # How the last today_for_user was served (Serve/RetryPreferred/Recheck/
+        # Fetch), for the card_timing log; None until a call reaches the cache
+        # decision. Logging only: decide on `asked_provider` instead.
         self.verdict: str | None = None
+        # Whether the last today_for_user asked a provider for a forecast.
+        self.asked_provider = False
 
     async def today_for_user(
         self,
@@ -44,36 +47,34 @@ class ForecastService:
             raise ValueError("User has no location")
         latitude, longitude = location
 
+        self.asked_provider = False
         local_now = datetime.now(ZoneInfo(user.timezone))
         local_today = local_now.date()
-        candidates = await self.repo.get_cached_forecasts(
-            user.id,
-            [local_today, local_today + timedelta(days=1)],
-            self.settings.forecast_cache_ttl_minutes,
-        )
+        candidates = await self.repo.get_cached_forecasts(user.id, [local_today, local_today + timedelta(days=1)])
 
-        verdict = verdict_for(candidates, local_now, event, self.sunsethue_client.is_configured, on_date)
+        verdict = verdict_for(
+            candidates,
+            local_now,
+            event,
+            self.sunsethue_client.is_configured,
+            ttl=timedelta(minutes=self.settings.forecast_cache_ttl_minutes),
+            on_date=on_date,
+        )
         self.verdict = type(verdict).__name__
         match verdict:
             case Serve(cached):
                 return _from_cache(cached)
-            case RetryPreferred(held):
+            case Recheck(held) if verdict.held_is_latest(await self.sunsethue_client.latest_run()):
+                return _from_cache(held)
+            case RetryPreferred(held) | Recheck(held):
+                # Provisional, or from an older run (or no way to tell): re-ask
+                # Sunsethue, and keep the held forecast if it declines rather
+                # than spending a second call on Open-Meteo.
                 upgraded = await self._retry_preferred_provider(latitude, longitude, user.timezone, event, on_date)
                 if upgraded is None:
                     return _from_cache(held)
                 await self._store(user.id, upgraded)
                 return upgraded
-            case Recheck(held):
-                latest = await self.sunsethue_client.latest_run()
-                if latest is not None and latest <= as_utc(held.run_at):
-                    return _from_cache(held)
-                # A newer run, or no way to tell: re-ask Sunsethue, but keep its
-                # own forecast over a provisional Open-Meteo one if it declines.
-                refreshed = await self._retry_preferred_provider(latitude, longitude, user.timezone, event, on_date)
-                if refreshed is None:
-                    return _from_cache(held)
-                await self._store(user.id, refreshed)
-                return refreshed
             case Fetch():
                 result = await self._fetch_forecast(latitude, longitude, user.timezone, event, on_date)
                 await self._store(user.id, result)
@@ -108,6 +109,7 @@ class ForecastService:
         """
         if not self.sunsethue_client.is_configured:
             return None
+        self.asked_provider = True
         try:
             return await self.sunsethue_client.forecast_for_today(latitude, longitude, timezone, event, on_date)
         except SunsethueError as exc:
@@ -122,6 +124,7 @@ class ForecastService:
         event: SolarEvent,
         on_date: date | None = None,
     ) -> ForecastResult:
+        self.asked_provider = True
         if self.sunsethue_client.is_configured:
             try:
                 return await self.sunsethue_client.forecast_for_today(latitude, longitude, timezone, event, on_date)
