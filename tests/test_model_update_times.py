@@ -18,6 +18,12 @@ def test_a_half_hour_zone_keeps_its_minutes():
     assert model_update_times("Asia/Kolkata", WINTER) == ["04:00", "10:00", "16:00", "22:00"]
 
 
+def test_from_25_november_they_are_half_an_hour_later():
+    after_change = datetime(2026, 11, 26, 9, 0, tzinfo=UTC)
+    assert model_update_times("Europe/Kyiv", after_change) == ["01:00", "07:00", "13:00", "19:00"]
+    assert model_update_times(None, after_change) == ["05:00", "11:00", "17:00", "23:00"]
+
+
 def test_without_a_location_they_are_given_in_utc():
     assert model_update_times(None, WINTER) == ["04:30", "10:30", "16:30", "22:30"]
 

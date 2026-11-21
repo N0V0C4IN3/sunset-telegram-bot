@@ -1,3 +1,5 @@
+import logging
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -5,6 +7,8 @@ import httpx
 
 from app.services.solar import WORDS, SolarEvent, days_to_ask
 from app.services.weather import ForecastResult, WeatherError
+
+logger = logging.getLogger(__name__)
 
 PROVIDER_SUNSETHUE = "sunsethue"
 
@@ -14,6 +18,46 @@ PROVIDER_SUNSETHUE = "sunsethue"
 BREAKER_FAILURE_THRESHOLD = 5
 BREAKER_COOLDOWN = timedelta(minutes=15)
 
+# /run-info costs a credit, so its answer is shared by every caller until the
+# next run is due, and re-asked this often while that run is overdue.
+RUN_INFO_RECHECK = timedelta(minutes=10)
+
+# When each day's four runs are published (UTC). Every response now names its
+# run and when the next is expected, and the cache goes by those; the schedule
+# only judges rows stored before that, and tells users when scores can change.
+# Sunsethue moved every run 30 minutes later from the 12z run of 25 Nov 2026.
+RUN_SCHEDULE_CHANGED_AT = datetime(2026, 11, 25, 12, 0, tzinfo=UTC)
+RUN_TIMES_BEFORE_CHANGE = (
+    time(4, 30, tzinfo=UTC),
+    time(10, 30, tzinfo=UTC),
+    time(16, 30, tzinfo=UTC),
+    time(22, 30, tzinfo=UTC),
+)
+RUN_TIMES = (
+    time(5, 0, tzinfo=UTC),
+    time(11, 0, tzinfo=UTC),
+    time(17, 0, tzinfo=UTC),
+    time(23, 0, tzinfo=UTC),
+)
+
+
+def run_times(at: datetime) -> tuple[time, ...]:
+    """The publication times in force at `at`."""
+    return RUN_TIMES if at >= RUN_SCHEDULE_CHANGED_AT else RUN_TIMES_BEFORE_CHANGE
+
+
+def latest_scheduled_run(now: datetime) -> datetime:
+    """The last scheduled publication at or before `now`, across the schedule change."""
+    now_utc = now.astimezone(UTC)
+    days = (now_utc.date() - timedelta(days=1), now_utc.date())
+    published = [
+        moment
+        for day in days
+        for at in (*RUN_TIMES_BEFORE_CHANGE, *RUN_TIMES)
+        if (moment := datetime.combine(day, at)) <= now_utc and at in run_times(moment)
+    ]
+    return max(published)
+
 
 class SunsethueError(WeatherError):
     pass
@@ -21,6 +65,12 @@ class SunsethueError(WeatherError):
 
 class SunsethueQuotaError(SunsethueError):
     pass
+
+
+@dataclass(frozen=True)
+class _RunInfo:
+    last_run: datetime
+    recheck_at: datetime
 
 
 class _Breaker:
@@ -56,10 +106,12 @@ class _Breaker:
 
 class SunsethueClient:
     event_url = "https://api.sunsethue.com/event"
+    run_info_url = "https://api.sunsethue.com/run-info"
 
     def __init__(self, api_key: str, fallback_api_key: str = "") -> None:
         self.api_keys = [key for key in [api_key, fallback_api_key] if key]
         self._breaker = _Breaker()
+        self._run_info: _RunInfo | None = None
 
     @property
     def is_configured(self) -> bool:
@@ -88,6 +140,39 @@ class SunsethueClient:
             raise
         self._breaker.record_success()
         return result
+
+    async def latest_run(self) -> datetime | None:
+        """The run Sunsethue's newest data comes from, or None when it cannot say.
+
+        One credit per call, behind the same breaker as forecasts. The answer is
+        held for every caller until the next run is due, or for RUN_INFO_RECHECK
+        while that run is overdue, so a delayed run costs a credit per recheck
+        rather than five per cached forecast.
+        """
+        now = datetime.now(UTC)
+        if self._run_info is not None and now < self._run_info.recheck_at:
+            return self._run_info.last_run
+        if not self.api_keys or not self._breaker.allows(now):
+            return None
+
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                payload = await self._get(client, self.run_info_url, {})
+            last_run = _parse_utc_datetime(str(payload["last_run"]))
+            next_run_time = _optional_utc_datetime(payload.get("next_run_time"))
+        except SunsethueQuotaError:
+            self._breaker.record_quota_exhaustion(now)
+            logger.info("sunsethue_run_info_unavailable reason=quota")
+            return None
+        except (SunsethueError, KeyError, ValueError) as exc:
+            self._breaker.record_failure(now)
+            logger.info("sunsethue_run_info_unavailable reason=%s", type(exc).__name__)
+            return None
+
+        self._breaker.record_success()
+        due = next_run_time is not None and next_run_time > now
+        self._run_info = _RunInfo(last_run, next_run_time if due else now + RUN_INFO_RECHECK)
+        return last_run
 
     async def _forecast_for_today(
         self,
@@ -136,10 +221,14 @@ class SunsethueClient:
             "type": str(event),
             "forecast": "true",
         }
+        return await self._get(client, self.event_url, params)
+
+    async def _get(self, client: httpx.AsyncClient, url: str, params: dict) -> dict:
+        """GET with the first key that still has quota."""
         quota_errors = 0
         for api_key in self.api_keys:
             try:
-                return await self._fetch_event_with_key(client, params, api_key)
+                return await self._get_with_key(client, url, params, api_key)
             except SunsethueQuotaError:
                 quota_errors += 1
                 continue
@@ -148,9 +237,9 @@ class SunsethueClient:
             raise SunsethueQuotaError("All Sunsethue API keys exceeded their quota")
         raise SunsethueError("Sunsethue API key is not configured")
 
-    async def _fetch_event_with_key(self, client: httpx.AsyncClient, params: dict, api_key: str) -> dict:
+    async def _get_with_key(self, client: httpx.AsyncClient, url: str, params: dict, api_key: str) -> dict:
         try:
-            response = await client.get(self.event_url, params=params, headers={"x-api-key": api_key})
+            response = await client.get(url, params=params, headers={"x-api-key": api_key})
         except httpx.HTTPError as exc:
             raise SunsethueError("Sunsethue request failed") from exc
 
@@ -197,6 +286,8 @@ class SunsethueClient:
             description=_description_for_quality(quality_text, data, timezone, event),
             weather_data=weather_data,
             event=event,
+            run_at=_optional_utc_datetime(payload.get("run")),
+            next_update_at=_optional_utc_datetime(payload.get("next_expected_update")),
         )
 
 
@@ -209,6 +300,16 @@ def _parse_utc_datetime(value: str) -> datetime:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)
+
+
+def _optional_utc_datetime(value: object) -> datetime | None:
+    """A UTC timestamp the forecast can do without: unreadable reads as absent."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return _parse_utc_datetime(value)
+    except ValueError:
+        return None
 
 
 def _response_json(response: httpx.Response) -> dict:

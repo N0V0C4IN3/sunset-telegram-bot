@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings
 from app.db.models import ForecastCache, User
 from app.db.repository import Repository
-from app.services.cache_verdict import Fetch, RetryPreferred, Serve, verdict_for
+from app.services.cache_verdict import Fetch, Recheck, RetryPreferred, Serve, as_utc, verdict_for
 from app.services.solar import SolarEvent, event_time
 from app.services.sunsethue import PROVIDER_SUNSETHUE, SunsethueClient, SunsethueError
 from app.services.weather import ForecastResult, OpenMeteoClient
@@ -63,6 +63,17 @@ class ForecastService:
                     return _from_cache(held)
                 await self._store(user.id, upgraded)
                 return upgraded
+            case Recheck(held):
+                latest = await self.sunsethue_client.latest_run()
+                if latest is not None and latest <= as_utc(held.run_at):
+                    return _from_cache(held)
+                # A newer run, or no way to tell: re-ask Sunsethue, but keep its
+                # own forecast over a provisional Open-Meteo one if it declines.
+                refreshed = await self._retry_preferred_provider(latitude, longitude, user.timezone, event, on_date)
+                if refreshed is None:
+                    return _from_cache(held)
+                await self._store(user.id, refreshed)
+                return refreshed
             case Fetch():
                 result = await self._fetch_forecast(latitude, longitude, user.timezone, event, on_date)
                 await self._store(user.id, result)
@@ -78,6 +89,8 @@ class ForecastService:
             score=result.score,
             description=result.description,
             weather_data=result.weather_data,
+            run_at=result.run_at,
+            next_update_at=result.next_update_at,
         )
 
     async def _retry_preferred_provider(
@@ -88,10 +101,10 @@ class ForecastService:
         event: SolarEvent,
         on_date: date | None = None,
     ) -> ForecastResult | None:
-        """Re-ask Sunsethue for a forecast we currently hold provisionally.
+        """Re-ask Sunsethue for a forecast we already hold: provisional, or from an older run.
 
-        Returns None when Sunsethue still cannot answer, in which case the caller
-        serves the held forecast rather than spending another Open-Meteo call.
+        Returns None when Sunsethue cannot answer, in which case the caller serves
+        the held forecast rather than spending another Open-Meteo call.
         """
         if not self.sunsethue_client.is_configured:
             return None
@@ -151,4 +164,6 @@ def _from_cache(cache: ForecastCache) -> ForecastResult:
         score=cache.score,
         description=cache.description,
         weather_data=cache.weather_data,
+        run_at=cache.run_at,
+        next_update_at=cache.next_update_at,
     )

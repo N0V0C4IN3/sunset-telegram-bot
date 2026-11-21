@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 from app.services.cache_verdict import (
     Fetch,
+    Recheck,
     RetryPreferred,
     Serve,
     _event_is_upcoming,
@@ -25,6 +26,8 @@ class FakeCache:
     provider: str = "open_meteo"
     weather_data: dict[str, Any] | None = None
     event: str = "sunset"
+    run_at: datetime | None = None
+    next_update_at: datetime | None = None
 
     @property
     def forecast_date(self):
@@ -187,7 +190,47 @@ def test_a_provisional_sunrise_re_asks_the_preferred_provider():
     assert verdict == RetryPreferred(sunrise)
 
 
-# The Sunsethue model-update clock, where the calendar edges are easiest to state.
+# A row that names its run is good until Sunsethue expects the next one.
+
+RUN_12Z = datetime(2026, 11, 26, 12, 0, tzinfo=UTC)
+
+
+def _named_run(local_now: datetime, next_update_at: datetime | None) -> FakeCache:
+    return FakeCache(
+        event_at=local_now + timedelta(hours=3),
+        # Fetched long ago and before the scheduled run: neither matters once a run is named.
+        fetched_at=datetime(2026, 11, 26, 9, 0, tzinfo=UTC),
+        provider="sunsethue",
+        run_at=RUN_12Z,
+        next_update_at=next_update_at,
+    )
+
+
+def test_a_row_is_served_until_its_next_expected_update():
+    local_now = datetime(2026, 11, 26, 18, 59, tzinfo=UTC)
+    cache = _named_run(local_now, next_update_at=datetime(2026, 11, 26, 23, 0, tzinfo=UTC))
+    assert verdict_for([cache], local_now, SolarEvent.SUNSET, preferred_available=True) == Serve(cache)
+
+
+def test_past_its_next_expected_update_a_row_is_rechecked_not_dropped():
+    local_now = datetime(2026, 11, 26, 23, 5, tzinfo=UTC)
+    cache = _named_run(local_now, next_update_at=datetime(2026, 11, 26, 23, 0, tzinfo=UTC))
+    assert verdict_for([cache], local_now, SolarEvent.SUNSET, preferred_available=True) == Recheck(cache)
+
+
+def test_a_row_sunsethue_expects_no_update_for_is_served_until_the_event():
+    local_now = datetime(2026, 11, 27, 3, 0, tzinfo=UTC)
+    cache = _named_run(local_now, next_update_at=None)
+    assert verdict_for([cache], local_now, SolarEvent.SUNSET, preferred_available=True) == Serve(cache)
+
+
+def test_a_naive_next_expected_update_is_read_as_utc():
+    local_now = datetime(2026, 11, 26, 22, 59, tzinfo=KYIV)  # 20:59 UTC
+    cache = _named_run(local_now, next_update_at=datetime(2026, 11, 26, 21, 0))
+    assert verdict_for([cache], local_now, SolarEvent.SUNSET, preferred_available=True) == Serve(cache)
+
+
+# Rows that name no run: the published schedule, where the calendar edges are easiest to state.
 
 
 def test_sunsethue_row_is_current_between_model_updates():
@@ -230,3 +273,30 @@ def test_passed_sunset_is_not_upcoming():
     local_now = datetime(2026, 8, 27, 21, 0, tzinfo=KYIV)
     cache = FakeCache(event_at=local_now - timedelta(minutes=1), fetched_at=local_now)
     assert _event_is_upcoming(cache, KYIV, local_now) is False
+
+
+def test_from_the_12z_run_of_25_november_runs_land_half_an_hour_later():
+    fetched_at = datetime(2026, 11, 25, 16, 40, tzinfo=UTC)
+    cache = FakeCache(event_at=fetched_at + timedelta(hours=8), fetched_at=fetched_at, provider="sunsethue")
+    # 16:30 is no longer a run, so a 16:40 fetch is still the 06z run, good until 17:00.
+    assert _sunsethue_cache_is_current(cache, datetime(2026, 11, 25, 16, 59, tzinfo=UTC)) is True
+    assert _sunsethue_cache_is_current(cache, datetime(2026, 11, 25, 17, 0, tzinfo=UTC)) is False
+
+
+def test_the_morning_of_25_november_keeps_the_old_times():
+    fetched_at = datetime(2026, 11, 25, 10, 35, tzinfo=UTC)
+    cache = FakeCache(event_at=fetched_at + timedelta(hours=8), fetched_at=fetched_at, provider="sunsethue")
+    assert _sunsethue_cache_is_current(cache, datetime(2026, 11, 25, 10, 50, tzinfo=UTC)) is True
+    assert _sunsethue_cache_is_current(cache, datetime(2026, 11, 25, 11, 5, tzinfo=UTC)) is True  # 11:00 is not a run until 12:00
+
+
+def test_after_the_change_the_night_run_is_at_23():
+    local_now = datetime(2026, 11, 27, 2, 0, tzinfo=UTC)
+    fresh = FakeCache(
+        event_at=local_now + timedelta(hours=12), fetched_at=datetime(2026, 11, 26, 23, 0, tzinfo=UTC), provider="sunsethue"
+    )
+    stale = FakeCache(
+        event_at=local_now + timedelta(hours=12), fetched_at=datetime(2026, 11, 26, 22, 45, tzinfo=UTC), provider="sunsethue"
+    )
+    assert _sunsethue_cache_is_current(fresh, local_now) is True
+    assert _sunsethue_cache_is_current(stale, local_now) is False

@@ -1,8 +1,8 @@
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
-from app.services.cache_verdict import SUNSETHUE_MODEL_AVAILABLE_AT_UTC
 from app.services.solar import SolarEvent
+from app.services.sunsethue import run_times
 from app.services.weather import ForecastResult
 
 HEADLINE = {SolarEvent.SUNSET: "🌅 Захід сонця", SolarEvent.SUNRISE: "🌄 Схід сонця"}
@@ -88,12 +88,13 @@ def settings_text(
 def model_update_times(timezone: str | None, now: datetime) -> list[str]:
     """HH:MM of the day's Sunsethue model updates, in clock order.
 
-    In the user's zone when one is saved, else UTC. Converted on today's date,
-    so a daylight-saving change moves them the way the user's clock moves.
+    The schedule in force at `now`, in the user's zone when one is saved, else
+    UTC. Converted on today's date, so a daylight-saving change moves them the
+    way the user's clock moves.
     """
     tz = ZoneInfo(timezone) if timezone else UTC
     today = now.astimezone(UTC).date()
-    local = (datetime.combine(today, at).astimezone(tz) for at in SUNSETHUE_MODEL_AVAILABLE_AT_UTC)
+    local = (datetime.combine(today, at).astimezone(tz) for at in run_times(now))
     return sorted(moment.strftime("%H:%M") for moment in local)
 
 
